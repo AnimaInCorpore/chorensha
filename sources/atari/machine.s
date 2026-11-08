@@ -168,13 +168,21 @@ initialize_machine:
 	move	$ffff820a.w,a2
 	movem.l	d0-a2,old_videl
 
-	; 256 * 240, TC, 50 Hz.
+	; 256 * 240, TC, 50 Hz on RGB/TV and VGA.
 	;
 	; Based on the Snow Bros 256 * 224 mode.  Keep its 625-halfline
 	; RGB/TV frame and expand the active window by 16 lines, centred:
 	; VDB $05f -> $04f and VDE $21f -> $22f.  The VGA mode makes the
 	; corresponding 32-halfline adjustment on each side because its
 	; source lines are scan-doubled.
+	;
+	; The game waits for each VBL, so 50 Hz instead of 60 Hz gives it
+	; and the renderer 20 ms a frame instead of 16.7 ms, and the Videl
+	; fetches a sixth fewer lines.  The VGA mode keeps its 31 kHz line
+	; timing and lengthens the frame from 525 to 630 lines (VFT $419 ->
+	; $4eb); the doubled lines stay centred (VBB, VBE, VDB, VDE +104
+	; half-lines, VSS +210).  50 Hz at 31 kHz is outside the VGA
+	; standard, so not every VGA monitor will accept it.
 
 	btst	#6,$ffff8006.w
 	beq		.set_vga_mode
@@ -198,9 +206,9 @@ initialize_machine:
 	move.l	#$fc00a9,$ffff8282.w
 	move.l	#$2502f3,$ffff8286.w
 	move.l	#$a800c0,$ffff828a.w
-	move.l	#$41903ef,$ffff82a2.w
-	move.l	#$2d002b,$ffff82a6.w
-	move.l	#$3eb0415,$ffff82aa.w
+	move.l	#$4eb0457,$ffff82a2.w ; VFT=$4eb (630 lines, 50 Hz)  VBB=$457
+	move.l	#$950093,$ffff82a6.w ; VBE=$095  VDB=$093
+	move.l	#$45304e7,$ffff82aa.w ; VDE=$453  VSS=$4e7
 	move	#$200,$ffff820a.w
 	move	#$182,$ffff82c0.w
 	clr		$ffff8266.w

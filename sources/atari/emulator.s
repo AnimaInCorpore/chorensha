@@ -52,9 +52,7 @@ vbl_handler:
 
 	addq	#1,vbl_wait_counter
 
-	clr.b	$fffffa1b.w
-	move.b	#255,$fffffa21.w
-	move.b	#8,$fffffa1b.w
+	bsr		restart_raster_throttle
 
 	clr.l	$ffff9800.w
 	
@@ -172,6 +170,8 @@ joypad_handler:
 ; ------------------------------------------------------------------------------
 
 timer_b_handler:
+	subq	#1,raster_stages_left ; Another SPRITE_THROTTLE_DISPLAY_LINES events.
+
 	rte
 
 ; ------------------------------------------------------------------------------

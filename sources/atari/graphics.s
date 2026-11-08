@@ -5,6 +5,8 @@
 	xdef compile_characters
 	xdef prepare_sprite_infos
 	xdef graphics_engine
+	xdef restart_raster_throttle
+	xdef raster_stages_left
 
 	xdef display_screen_address
 	xdef work_screen_address
@@ -1355,9 +1357,9 @@ clear_text:
 	bpl		.sprite_loop
 	
 .start:
-	cmp.b	#255-SPRITE_THROTTLE_DISPLAY_LINES,$fffffa21.w
-	bcc		.start2
-	
+	tst		raster_stages_left
+	bgt		.start2
+
 	move.l	a3,next_text_infos_address
 	move.l	#.resume,next_graphics_routine
 	
@@ -1401,8 +1403,8 @@ draw_sprites:
 
 	move.l	(sp)+,a0
 
-	cmp.b	#255-SPRITE_THROTTLE_DISPLAY_LINES,$fffffa21.w
-	bcc		.start
+	tst		raster_stages_left
+	bgt		.start
 	
 	move.l	a0,next_sprite_infos_address
 	move.l	#draw_sprites,next_graphics_routine
@@ -1438,8 +1440,8 @@ clear_sprites_dsp:
 	btst	#3,$ffffa202.w
 	beq		.start
 
-	cmp.b	#255-SPRITE_THROTTLE_DISPLAY_LINES,$fffffa21.w
-	bcc		.wait_for_dsp_loop
+	tst		raster_stages_left
+	bgt		.wait_for_dsp_loop
 	
 	move.l	#clear_sprites_dsp,next_graphics_routine
 	
@@ -1457,14 +1459,28 @@ clear_sprites_dsp:
 
 	move	(a1),d0 ; RLE count.
 
-	move	#255,d2
-	sub.b	$fffffa21.w,d2
+	; Restore now if the runs (about 16 a line) fit into the display lines
+	; left before the throttle line. Read Timer B's count before the stage:
+	; an interrupt in between then makes the estimate short, not long.
+
+	moveq	#0,d1
+	move.b	$fffffa21.w,d1 ; Events left in this stage.
+	move	raster_stages_left,d2
+	ble		.defer_rle
+
+	subq	#1,d2
+	mulu	#SPRITE_THROTTLE_DISPLAY_LINES,d2
+	add		d1,d2
+	move	raster_stages,d1
+	subq	#1,d1
+	lsr		d1,d2 ; Display lines left (two events a line when doubled).
+
 	move	d0,d1
 	lsr		#4,d1
-	add		d1,d2
-	cmp		#SPRITE_THROTTLE_DISPLAY_LINES,d2
+	cmp		d2,d1
 	bcs		.rle_loop
-	
+
+.defer_rle:
 	move.l	#.clear_sprites_dsp2,next_graphics_routine
 	
 	movem.l	(sp)+,d0-a6
@@ -1608,8 +1624,8 @@ draw_text:
 
 	add.l	#4*4,a0
 
-	cmp.b	#255-SPRITE_THROTTLE_DISPLAY_LINES,$fffffa21.w
-	bcc		.loop
+	tst		raster_stages_left
+	bgt		.loop
 	
 	move.l	a0,next_text_infos_address
 
@@ -1746,6 +1762,56 @@ clear_sprites:
 
 graphics_engine:
 	move.l	next_graphics_routine,-(sp)
+	rts
+
+; ------------------------------------------------------------------------------
+;
+; Called by the VBL handler. The graphics stages yield once the display has
+; reached SPRITE_THROTTLE_DISPLAY_LINES, so that the game keeps the rest of the
+; frame. Timer B counts these lines in event count mode and interrupts every
+; SPRITE_THROTTLE_DISPLAY_LINES events; the handler decrements
+; raster_stages_left, and the stages yield when it is no longer positive.
+;
+; A line-doubled VGA mode shows each line twice, so Timer B may count two events
+; per display line there (Hatari's Falcon timing counts one). raster_stages is
+; therefore set from the events of the previous frame: about 240 means one
+; stage, about 480 two. No events arrive during the vertical blank, so Timer B
+; and raster_stages_left are stable here.
+;
+
+restart_raster_throttle:
+	movem.l	d0-d1,-(sp)
+
+	move	raster_stages,d0
+	sub		raster_stages_left,d0 ; Timer B interrupts in the last frame.
+	mulu	#SPRITE_THROTTLE_DISPLAY_LINES,d0
+	add		#SPRITE_THROTTLE_DISPLAY_LINES,d0
+	moveq	#0,d1
+	move.b	$fffffa21.w,d1
+	sub		d1,d0 ; Timer B events in the last frame.
+
+	cmp		#300,d0
+	bcs		.single_events
+
+	cmp		#420,d0
+	bcs		.restart ; In between (a late VBL): keep the current setting.
+
+	move	#2,raster_stages
+
+	bra		.restart
+
+.single_events:
+	move	#1,raster_stages
+
+.restart:
+	move	raster_stages,raster_stages_left
+
+	clr.b	$fffffa1b.w
+	move.b	#SPRITE_THROTTLE_DISPLAY_LINES,$fffffa21.w
+	move.b	#8,$fffffa1b.w
+
+	movem.l	(sp)+,d0-d1
+
 	rts
 
 ; ------------------------------------------------------------------------------
@@ -1894,7 +1960,10 @@ work_text_infos_address:
 	
 display_text_infos_address:
 	dc.l	text_infos2
-	
+
+raster_stages: ; Timer B interrupts until the throttle line: 1, or 2 if doubled.
+	dc		1
+
 ; ------------------------------------------------------------------------------
 	bss
 ; ------------------------------------------------------------------------------
@@ -1918,6 +1987,9 @@ display_background_position:
 	ds		1
 
 work_background_position:
+	ds		1
+
+raster_stages_left: ; Counted down by the Timer B interrupt.
 	ds		1
 
 sprite_infos1: ; screen_address, palette_address, sprite_draw_address, sprite_clear_address.
