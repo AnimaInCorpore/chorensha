@@ -21,12 +21,10 @@ diff binaries/sz2.dif binaries/x68000/sz2.dif
 ./tools/vasmm68k_mot_mac sources/atari/emulator.s -quiet -Faout -m68030 -o binaries/emulator.o
 ./tools/vasmm68k_mot_mac sources/atari/machine.s -quiet -Faout -m68030 -o binaries/machine.o
 ./tools/vasmm68k_mot_mac sources/atari/graphics.s -quiet -Faout -m68030 -o binaries/graphics.o
-./tools/vasmm68k_mot_mac sources/atari/graphics.s -quiet -Faout -m68030 -D__HATARI__ -o binaries/graphics_hatari.o
 ./tools/vasmm68k_mot_mac sources/atari/audio.s -quiet -Faout -m68030 -o binaries/audio.o
 
 ./tools/vlink_mac binaries/main.o binaries/sz2_atari.o binaries/mem_map.o binaries/input.o binaries/emulator.o binaries/machine.o binaries/graphics.o binaries/audio.o -tos-flags 7 -bataritos -estart -o binaries/atari/sz2_dbg.tos
 ./tools/vlink_mac binaries/main.o binaries/sz2_atari.o binaries/mem_map.o binaries/input.o binaries/emulator.o binaries/machine.o binaries/graphics.o binaries/audio.o -s -tos-flags 7 -bataritos -estart -o binaries/atari/sz2.tos
-./tools/vlink_mac binaries/main.o binaries/sz2_atari.o binaries/mem_map.o binaries/input.o binaries/emulator.o binaries/machine.o binaries/graphics_hatari.o binaries/audio.o -s -tos-flags 7 -bataritos -estart -o binaries/atari/sz2_hatari.tos
 
 # DSP: the native ASM56000 rebuild of Motorola's CLAS56 ("make asm56000 cldlod"
 # in its checkout). Set DSP_TOOLS to its build directory if it is not next to
