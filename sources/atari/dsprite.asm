@@ -10,6 +10,9 @@ TOTAL_NUMBER_OF_PACKED_SPRITES equ 1900
 NUMBER_OF_PACKED_SPRITES1 equ 1100 ; Keep some space within the X memory for DSP boot code.
 RLE_RESTORE_WIDTH equ 16+256+16
 RLE_LONG_EVEN_BIAS equ RLE_RESTORE_WIDTH+4 ; Odd-run block plus its preceding BRA.W.
+RLE_LINE_BYTES equ 512*2 ; One screen line, including the part right of the restore area.
+RLE_MAX_OFFSET equ $7fff ; The 68030 adds offsets with ADDA.W.
+RLE_GAP_SPLIT equ RLE_MAX_OFFSET+1-RLE_LINE_BYTES ; A gap this long is sent before it can overflow.
 
 push	macro	register
         move    register,y:-(r7)
@@ -50,6 +53,7 @@ _loop:
 	jsr		<receive_sprite_infos
 	jsr		<draw_inverted_masks
 	jsr		<create_rle_data
+	jsr		<convert_rle_data
 	jsr		<send_rle_data
 	jsr		<swap_sprite_infos
 	jsr		<draw_masks
@@ -424,13 +428,26 @@ _loop2:
 	clr		b b1,y:(r5)+
 
 _next_line:
-	add		y1,b
+	add		y1,b #>RLE_GAP_SPLIT,a
+
+	; No run is open at the end of a line. Send a long gap now as an
+	; offset with an empty run, so that every offset fits in 16 bits:
+	; one more line, including its runs, adds at most RLE_LINE_BYTES.
+
+	cmp		a,b
+	jlt		<_next_line2
+
+	clr		b b1,y:(r5)+ ; Offset.
+	move	b1,y:(r5)+ ; Empty run.
+
+_next_line2:
+	nop
 _loop:
 
 	clr		b
 	move	b1,y:(r5)+ ; Offset.
-	move	#>-12,b
-	move	b1,y:(r5)+ ; Number of pixels.
+	move	#>12,b
+	move	b1,y:(r5)+ ; Jump displacement past the 68030 RLE loop.
 
 	move	#rle_buffer,x0
 	move	r5,a
@@ -441,14 +458,43 @@ _loop:
 
 ; -----------------------------------------------------------------------------
 
+; Convert each run's byte length to a jump displacement into the 68030
+; longword restoration blocks. Odd runs end with one word move. This runs
+; before the transfer: the 68030 reads the host port without polling, so
+; send_rle_data must not spend time between a run's offset and its length.
+; The terminal run already holds its displacement.
+
+convert_rle_data:
+	move	y:rle_length,a
+	asr		a #>1,x1 ; Number of runs.
+	sub		x1,a #rle_buffer+1,r4 ; Runs before the terminal one.
+	jeq		<_skip
+
+	move	#>RLE_LONG_EVEN_BIAS,x0
+	move	#2,n4
+
+	do		a1,_loop
+
+	btst	#1,y:(r4) ; Odd number of pixels?
+	tfr		x0,b y:(r4),a
+	tcs		x1,b
+	asr		a ; Number of pixels.
+	add		b,a
+	neg		a
+	move	a1,y:(r4)+n4
+_loop:
+
+_skip:
+	rts
+
+; -----------------------------------------------------------------------------
+
 send_rle_data:
 	move	#rle_buffer,r4
 
-	move	y:rle_length,a
-	bclr	#0,sr
-	ror		a #<0,y0
-	move	#>RLE_LONG_EVEN_BIAS,x0
-	move	#>1,x1
+	move	y:rle_length,b ; Number of words.
+	tfr		b,a
+	asr		a ; Number of runs.
 
 	bclr	#m_hf2,x:m_hcr ; DSP <-> CPU synchronization.
 	jset	#m_hf0,x:m_hsr,*
@@ -456,39 +502,10 @@ send_rle_data:
 	jclr	#1,x:m_hsr,*
 	movep	a1,x:m_htx
 
-	do		a1,_loop
+	do		b1,_loop
 
 	jclr	#1,x:m_hsr,*
-	movep	y:(r4),x:m_htx
-
-	move	y0,y:(r4)+
-
-	move	y:(r4),a
-	tst		a y0,y:(r4)+
-	jmi		<_terminal_rle_run
-
-	; Convert the byte length to a jump displacement into the 68030
-	; longword restoration blocks. Odd runs end with one word move.
-
-	bclr	#0,sr
-	ror		a
-	jclr	#0,a1,_even_rle_run
-
-	add		x1,a
-	neg		a
-	jmp		<_send_rle_run
-
-_even_rle_run:
-	add		x0,a
-	neg		a
-	jmp		<_send_rle_run
-
-_terminal_rle_run:
-	neg		a
-
-_send_rle_run:
-	jclr	#1,x:m_hsr,*
-	movep	a1,x:m_htx
+	movep	y:(r4)+,x:m_htx
 _loop:
 
 	rts

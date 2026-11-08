@@ -1449,14 +1449,13 @@ clear_sprites_dsp:
 
 .start:
 	bclr	#3,$ffffa200.w
-	
-	lea		$ffffa204.w,a0
+
 	lea		$ffffa204+2.w,a1
 	lea		background_image+16*256*2*2,a2
 	move.l	work_screen_address,a3
 	add.l	#16*256*2*2,a3
 
-	move.l	(a0),d0 ; RLE count.
+	move	(a1),d0 ; RLE count.
 
 	move	#255,d2
 	sub.b	$fffffa21.w,d2
@@ -1475,7 +1474,6 @@ clear_sprites_dsp:
 .clear_sprites_dsp2:
 	movem.l	d0-a6,-(sp)
 
-	lea		$ffffa204.w,a0
 	lea		$ffffa204+2.w,a1
 	lea		background_image+16*256*2*2,a2
 	move.l	work_screen_address,a3
@@ -1505,10 +1503,14 @@ clear_sprites_dsp:
 
 	move	(a2)+,(a3)+
 
+	; Offsets are 0..$7fff bytes (the DSP splits longer gaps), so they
+	; are read as words. The terminal run's displacement of 12 lands on
+	; .skip, right behind this loop.
+
 .rle_loop:
-	move.l	(a0),d0
-	add.l	d0,a2
-	add.l	d0,a3
+	move	(a1),d0
+	adda.w	d0,a2
+	adda.w	d0,a3
 
 	move	(a1),d1
 
