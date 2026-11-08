@@ -2,6 +2,8 @@
 # friends); these are produced by building the Atari target and re-dirty the
 # tree after every build.
 /binaries/*.o
+/binaries/dsprite.cld
+/binaries/dsprite.lst
 /binaries/atari/*.o
 /binaries/atari/*.lod
 /binaries/atari/*.tos

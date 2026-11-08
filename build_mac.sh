@@ -28,8 +28,12 @@ diff binaries/sz2.dif binaries/x68000/sz2.dif
 ./tools/vlink_mac binaries/main.o binaries/sz2_atari.o binaries/mem_map.o binaries/input.o binaries/emulator.o binaries/machine.o binaries/graphics.o binaries/audio.o -s -tos-flags 7 -bataritos -estart -o binaries/atari/sz2.tos
 ./tools/vlink_mac binaries/main.o binaries/sz2_atari.o binaries/mem_map.o binaries/input.o binaries/emulator.o binaries/machine.o binaries/graphics_hatari.o binaries/audio.o -s -tos-flags 7 -bataritos -estart -o binaries/atari/sz2_hatari.tos
 
-wine ./tools/asm56000.exe -q -a -isources/atari -bbinaries/dsprite.cld -z -lbinaries/dsprite.lst sources/atari/dsprite.asm
-wine ./tools/cldlod.exe binaries/dsprite.cld > binaries/atari/dsprite.lod
+# DSP: the native ASM56000 rebuild of Motorola's CLAS56 ("make asm56000 cldlod"
+# in its checkout). Set DSP_TOOLS to its build directory if it is not next to
+# this one.
+DSP_TOOLS="${DSP_TOOLS:-../ASM56000/build}"
+"$DSP_TOOLS/asm56000" -q -a -isources/atari -bbinaries/dsprite.cld -z -lbinaries/dsprite.lst sources/atari/dsprite.asm
+"$DSP_TOOLS/cldlod" binaries/dsprite.cld > binaries/atari/dsprite.lod
 
 #
 # Amiga
