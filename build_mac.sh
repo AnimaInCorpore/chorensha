@@ -30,10 +30,11 @@ diff binaries/sz2.dif binaries/x68000/sz2.dif
 
 # DSP: the native ASM56000 rebuild of Motorola's CLAS56 ("make asm56000 cldlod"
 # in its checkout). Set DSP_TOOLS to its build directory if it is not next to
-# this one.
+# this one. TOS's Dsp_LoadProg needs CRLF line endings (an LF file crashes it),
+# so the native cldlod output is converted to what the DOS original writes.
 DSP_TOOLS="${DSP_TOOLS:-../ASM56000/build}"
 "$DSP_TOOLS/asm56000" -q -a -isources/atari -bbinaries/dsprite.cld -z -lbinaries/dsprite.lst sources/atari/dsprite.asm
-"$DSP_TOOLS/cldlod" binaries/dsprite.cld > binaries/atari/dsprite.lod
+"$DSP_TOOLS/cldlod" binaries/dsprite.cld | awk '{ sub(/\r$/, ""); printf "%s\r\n", $0 }' > binaries/atari/dsprite.lod
 
 #
 # Amiga
