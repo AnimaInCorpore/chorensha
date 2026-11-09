@@ -22,11 +22,23 @@ cp binaries/sz2.x binaries/x68000/CH68_101_B/SZ2.X
 ./tools/vasmm68k_mot.exe sources/atari/machine.s -quiet -Faout -m68030 -o binaries/machine.o
 ./tools/vasmm68k_mot.exe sources/atari/graphics.s -quiet -Faout -m68030 -o binaries/graphics.o
 ./tools/vasmm68k_mot.exe sources/atari/audio.s -quiet -Faout -m68030 -o binaries/audio.o
+./tools/vasmm68k_mot.exe sources/atari/music.s -quiet -Faout -m68030 -o binaries/music.o
+./tools/vasmm68k_mot.exe sources/mcdrv.s -quiet -no-opt -Faout -m68030 -D__ATARI__ -o binaries/mcdrv.o
 
-./tools/vlink.exe binaries/main.o binaries/sz2_atari.o binaries/mem_map.o binaries/input.o binaries/emulator.o binaries/machine.o binaries/graphics.o binaries/audio.o -tos-flags 7 -bataritos -estart -o binaries/atari/sz2_dbg.tos
-./tools/vlink.exe binaries/main.o binaries/sz2_atari.o binaries/mem_map.o binaries/input.o binaries/emulator.o binaries/machine.o binaries/graphics.o binaries/audio.o -s -tos-flags 7 -bataritos -estart -o binaries/atari/sz2.tos
+./tools/vlink.exe binaries/main.o binaries/sz2_atari.o binaries/mem_map.o binaries/input.o binaries/emulator.o binaries/machine.o binaries/graphics.o binaries/audio.o binaries/music.o binaries/mcdrv.o -tos-flags 7 -bataritos -estart -o binaries/atari/sz2_dbg.tos
+./tools/vlink.exe binaries/main.o binaries/sz2_atari.o binaries/mem_map.o binaries/input.o binaries/emulator.o binaries/machine.o binaries/graphics.o binaries/audio.o binaries/music.o binaries/mcdrv.o -s -tos-flags 7 -bataritos -estart -o binaries/atari/sz2.tos
 
 ./tools/asm56000.exe -q -a -isources/atari -bbinaries/dsprite.cld -z -lbinaries/dsprite.lst sources/atari/dsprite.asm
+# dsprite.asm places its code by hand around fixed data (internal P up to
+# $1FF, external from $200), and the assembler can size a forward jump
+# differently in its two passes without an error: check the listing for code
+# placed twice and for jump targets that missed their labels.
+if command -v python3 >/dev/null 2>&1; then
+	python3 tools/check_dsp_listing.py binaries/dsprite.lst || exit 1
+else
+	DSP_OVERLAP=$(grep -E "^ *[0-9]+ +P:[0-9A-F]{4} [0-9A-F]{6}" binaries/dsprite.lst | awk '{print $2}' | sort | uniq -d | head -3)
+	if [ -n "$DSP_OVERLAP" ]; then echo "dsprite.asm: code overlaps at $DSP_OVERLAP"; exit 1; fi
+fi
 ./tools/cldlod.exe binaries/dsprite.cld > binaries/atari/dsprite.lod
 
 #

@@ -19,19 +19,13 @@ SCREEN_DISPLAY_OFFSET=16*2+16*256*2*2
 TOTAL_NUMBER_OF_SPRITES=1885
 TOTAL_NUMBER_OF_CHARACTERS=128 ; 4096 / (4 * 8) = 128
 SPRITE_THROTTLE_DISPLAY_LINES=170 ; 240*3/4 = 180
+MASK_HASH_SIZE=4096 ; Hash table for finding equal sprite masks.
 
 ; ------------------------------------------------------------------------------
 	text
 ; ------------------------------------------------------------------------------
 
 initialize_graphics:
-	; Prepare to send all sprite masks to the DSP.
-
-	btst	#1,$ffffa202.w
-	beq		*-6
-
-	move.l	#TOTAL_NUMBER_OF_SPRITES,$ffffa204.w
-
 	; Physbase.
 
 	move	#2,-(sp)
@@ -495,7 +489,7 @@ convert_sprite_to_restore_data:
 
 ; ------------------------------------------------------------------------------
 
-build_and_send_sprite_mask_to_dsp:
+build_sprite_mask:
 	movem.l	d0-a6,-(sp)
 
 	lea		sprite_matrix,a0
@@ -521,9 +515,9 @@ build_and_send_sprite_mask_to_dsp:
 
 	dbf		d7,.loop
 
-	; Send packed mask to DSP.
+	; Pack the mask into 11 DSP words (one per long).
 
-	lea		$ffffa204.w,a0
+	lea		packed_mask,a0
 	lea		sprite_mask_bitmap,a1
 
 	rept 5
@@ -531,18 +525,116 @@ build_and_send_sprite_mask_to_dsp:
 	move.l	(a1)+,d0
 	move	d0,d1
 	lsr.l	#8,d0
-	move.l	d0,(a0)
+	move.l	d0,(a0)+
 	swap	d1
 	move	(a1)+,d1
-	move.l	d1,(a0)
+	move.l	d1,(a0)+
 
 	endr
 
 	move	(a1)+,d0
 	lsl.l	#8,d0
-	move.l	d0,(a0)
+	move.l	d0,(a0)+
+
+	; Many sprites share a mask: keep each mask once, and give the sprite
+	; the index of its mask (sprite_mask_index).
+
+	lea		packed_mask,a0
+	moveq	#0,d0
+	moveq	#11-1,d7
+
+.hash:
+	move.l	(a0)+,d1
+	eor.l	d1,d0
+	rol.l	#5,d0
+	dbf		d7,.hash
+
+	move	d0,d1
+	swap	d0
+	eor		d1,d0
+
+	and		#MASK_HASH_SIZE-1,d0
+	lea		mask_hash_table,a2 ; Unique index + 1, 0 = empty.
+
+.probe:
+	move	(a2,d0.w*2),d5
+	beq		.new
+
+	subq	#1,d5
+	moveq	#0,d1
+	move	d5,d1
+	mulu	#11*4,d1
+	lea		unique_masks,a3
+	add.l	d1,a3
+	lea		packed_mask,a0
+	moveq	#11-1,d7
+
+.compare:
+	cmpm.l	(a0)+,(a3)+
+	dbne	d7,.compare
+	beq		.found
+
+	addq	#1,d0
+	and		#MASK_HASH_SIZE-1,d0
+	bra		.probe
+
+.new:
+	move	unique_mask_count,d5
+	move	d5,d1
+	addq	#1,d1
+	move	d1,(a2,d0.w*2)
+
+	moveq	#0,d1
+	move	d5,d1
+	mulu	#11*4,d1
+	lea		unique_masks,a3
+	add.l	d1,a3
+	lea		packed_mask,a0
+
+	rept 11
+	move.l	(a0)+,(a3)+
+	endr
+
+	addq	#1,unique_mask_count
+
+.found:
+	move	d5,sprite_mask_index
 
 	movem.l	(sp)+,d0-a6
+
+	rts
+
+; ------------------------------------------------------------------------------
+
+; Send the count and the unique masks to the DSP, once all sprites are
+; compiled.
+
+send_sprite_masks:
+	movem.l	d0-d1/a0-a1,-(sp)
+
+	lea		$ffffa204.w,a0
+	lea		unique_masks,a1
+
+	moveq	#0,d0
+	move	unique_mask_count,d0
+
+	btst	#1,$ffffa202.w
+	beq		*-6
+	move.l	d0,(a0)
+
+	mulu	#11,d0
+	subq.l	#1,d0
+
+.loop:
+	btst	#1,$ffffa202.w
+	beq		*-6
+	move.l	(a1)+,(a0)
+	subq.l	#1,d0
+	bpl		.loop
+
+	jsr		send_music_tables
+
+	movem.l	(sp)+,d0-d1/a0-a1
 
 	rts
 
@@ -625,9 +717,9 @@ compile_sprite:
 
 	dbf		d7,.lines_loop1
 
-	; Send sprite mask to DSP.
+	; Sprite mask for the DSP.
 
-	jsr		build_and_send_sprite_mask_to_dsp
+	jsr		build_sprite_mask
 
 	; Palette color counting.
 
@@ -739,9 +831,15 @@ compile_sprite:
 	jsr		convert_sprite_to_restore_data
 
 	addq.l	#8,a0
-	move	sprite_count,(a0)
+	move	sprite_mask_index,(a0) ; The DSP knows the sprite by its mask.
 	addq	#1,sprite_count
 
+	cmp		#TOTAL_NUMBER_OF_SPRITES,sprite_count
+	bne		.not_last
+
+	jsr		send_sprite_masks
+
+.not_last:
 	movem.l	(sp)+,d0-a6
 
 	rts
@@ -1217,12 +1315,15 @@ process_sprite_infos:
 	move.l	work_sprite_infos_address_new,a4
 	lea		$ffffa204+2.w,a6
 
-	btst	#3,$ffffa202.w
+	btst	#3,$ffffa202.w ; HF2: the DSP waits for a packet.
 	beq		*-6
 
-	bset	#3,$ffffa200.w
+	jsr		send_music_packet
 
 	move.l	d7,$ffffa204.w ; Send number of sprite infos to be sent to the DSP.
+
+	btst	#2,$ffffa202.w ; TRDY: it has taken the count; the rest goes unpolled.
+	beq		*-6
 
 	subq	#1,d7
 
@@ -1251,13 +1352,15 @@ process_sprite_infos:
 	move	d3,d1
 	and		#$c000,d1
 	or		32(a5),d1
-	move	d1,(a6) ; Flip info + sprite ID -> DSP.
-	move	d0,(a6) ; X position -> DSP.
-	move	d5,(a6) ; Y position -> DSP.
+	; The DSP reads these without the 68030 polling; spacing them out
+	; leaves it time for an SSI interrupt between two words.
 
+	move	d1,(a6) ; Flip info + mask index -> DSP.
 	rol		#2,d3
 	and		#$3,d3
+	move	d0,(a6) ; X position -> DSP.
 	lea		(a5,d3.w*4),a5
+	move	d5,(a6) ; Y position -> DSP.
 	move.l	(a5),(a4)+ ; Sprite draw address.
 	move.l	16(a5),(a4)+ ; Sprite restore address.
 
@@ -1437,8 +1540,8 @@ clear_sprites_dsp:
 	beq		.skip
 
 .wait_for_dsp_loop:
-	btst	#3,$ffffa202.w
-	beq		.start
+	btst	#0,$ffffa202.w ; The DSP has sent the run count.
+	bne		.start
 
 	tst		raster_stages_left
 	bgt		.wait_for_dsp_loop
@@ -1450,8 +1553,6 @@ clear_sprites_dsp:
 	rts
 
 .start:
-	bclr	#3,$ffffa200.w
-
 	lea		$ffffa204+2.w,a1
 	lea		background_image+16*256*2*2,a2
 	move.l	work_screen_address,a3
@@ -1478,7 +1579,7 @@ clear_sprites_dsp:
 	move	d0,d1
 	lsr		#4,d1
 	cmp		d2,d1
-	bcs		.rle_loop
+	bcs		.send_runs
 
 .defer_rle:
 	move.l	#.clear_sprites_dsp2,next_graphics_routine
@@ -1494,6 +1595,13 @@ clear_sprites_dsp:
 	lea		background_image+16*256*2*2,a2
 	move.l	work_screen_address,a3
 	add.l	#16*256*2*2,a3
+
+.send_runs:
+	jsr		send_music_packet ; The DSP takes music while it waits for HF1.
+
+	bset	#4,$ffffa200.w ; HF1: the DSP may send the runs now; it
+	btst	#0,$ffffa202.w ; renders no music while it does, so after the
+	beq		*-6 ; first word they come without polling.
 
 	bra		.rle_loop
 
@@ -1533,6 +1641,8 @@ clear_sprites_dsp:
 	jmp		.rle_loop(pc,d1.w)
 
 .skip:
+	bclr	#4,$ffffa200.w
+
 	move.l	work_sprite_infos_address_new,a0	
 	clr.l	(a0)
 	
@@ -2044,6 +2154,21 @@ sprite_mask_bitmap:
 
 sprite_count:
 	ds		1
+
+sprite_mask_index:
+	ds		1
+
+unique_mask_count:
+	ds		1
+
+packed_mask:
+	ds.l	11
+
+mask_hash_table:
+	ds		MASK_HASH_SIZE
+
+unique_masks:
+	ds.l	TOTAL_NUMBER_OF_SPRITES*11
 
 sort_buffers:
 	ds		32*512

@@ -129,13 +129,8 @@ initialize_machine:
 
 	move.b	#0,$ffff8900.w														| Interrupt selection.
 	move.b	#0,$ffff8901.w														| DMA control.
-	move.b	#0,$ffff8920.w														| DMA track selection.
-	move.b	#1,$ffff8921.w														| Sample size and Frequency (8 bit + 12517 Hz).
-	move	#1,$ffff8930.w														| Crossbar source.
-	move	#1,$ffff8932.w														| Crossbar destination.
-	move.b	#0,$ffff8934.w														| Frequency external clock (STE compatible).
-	move.b	#0,$ffff8935.w														| Frequency internal clock (STE compatible).
-	move.b	#0,$ffff8936.w														| Record track selection.
+
+	jsr		initialize_sound
 
 	move.b	$fffffa07.w,old_fa07
 	move.b	$fffffa09.w,old_fa09
@@ -291,6 +286,91 @@ release_machine:
 	movem.l	d6-a0,$ffff82a2.w
 	move.l	a1,$ffff82c0.w
 	move	a2,$ffff820a.w
+
+	rts
+
+; ------------------------------------------------------------------------------
+
+; Sound runs through the DSP: DMA playback (the sound effects, 16-bit
+; stereo) goes to the DSP's SSI receive, the DSP's SSI transmit to the DAC,
+; both at 25.175 MHz / 256 / 4 = 24585 Hz. The DSP adds the effects to its
+; output. The registers are restored from old_89xx on exit.
+
+initialize_sound:
+	movem.l	d0-d2/a0-a2,-(sp)
+
+	move	#128,-(sp) ; Locksnd.
+	trap	#14
+	addq.l	#2,sp
+
+	move	#1,-(sp) ; Sndstatus(reset).
+	move	#140,-(sp)
+	trap	#14
+	addq.l	#4,sp
+
+	move	#1,-(sp) ; Setmode(16-bit stereo).
+	move	#132,-(sp)
+	trap	#14
+	addq.l	#4,sp
+
+	clr		-(sp) ; Settracks(one track each way).
+	clr		-(sp)
+	move	#133,-(sp)
+	trap	#14
+	addq.l	#6,sp
+
+	clr		-(sp) ; Setmontracks(0).
+	move	#134,-(sp)
+	trap	#14
+	addq.l	#4,sp
+
+	move	#1,-(sp) ; Devconnect(DMA playback, DSP receive, 25 MHz, 3, no handshake).
+	move	#3,-(sp)
+	clr		-(sp)
+	move	#2,-(sp)
+	clr		-(sp)
+	move	#139,-(sp)
+	trap	#14
+	lea		12(sp),sp
+
+	move	#1,-(sp) ; Devconnect(DSP transmit, DAC, 25 MHz, 3, no handshake).
+	move	#3,-(sp)
+	clr		-(sp)
+	move	#8,-(sp)
+	move	#1,-(sp)
+	move	#139,-(sp)
+	trap	#14
+	lea		12(sp),sp
+
+	move	#1,-(sp) ; Dsptristate(transmit on, receive on).
+	move	#1,-(sp)
+	move	#137,-(sp)
+	trap	#14
+	addq.l	#6,sp
+
+	move	#2,-(sp) ; Soundcmd(ADDERIN, matrix).
+	move	#4,-(sp)
+	move	#130,-(sp)
+	trap	#14
+	addq.l	#6,sp
+
+	clr		-(sp) ; Soundcmd(LTATTEN, 0).
+	clr		-(sp)
+	move	#130,-(sp)
+	trap	#14
+	addq.l	#6,sp
+
+	clr		-(sp) ; Soundcmd(RTATTEN, 0).
+	move	#1,-(sp)
+	move	#130,-(sp)
+	trap	#14
+	addq.l	#6,sp
+
+	move	#129,-(sp) ; Unlocksnd.
+	trap	#14
+	addq.l	#2,sp
+
+	movem.l	(sp)+,d0-d2/a0-a2
 
 	rts
 

@@ -21,13 +21,14 @@ A beta.  The game runs, but it has not been played through, and the changes made
 (Falcon030 at 16 MHz, TOS 4.04, 14 MB, emulated DSP): the info screen, the title menu and the attract mode on an RGB
 monitor (50 Hz) and on a VGA monitor (60 Hz).
 
-In the attract mode in Hatari the game logic runs every VBL, and the picture keeps up with about 91% of the frames on
-RGB (about 45 pictures a second) and 87% on VGA (about 52).  These are Hatari figures, not measurements on real
-hardware.
+In the attract mode in Hatari the game logic runs every VBL.  Over the first 40 s of the stage 1 demo on RGB, the
+picture keeps up with about 73% of the frames (about 36 pictures a second); before the music it was 86% (about 43).
+VGA has not been measured since the music.  These are Hatari figures, not measurements on real hardware.
 
 Known limitations:
 
-- No music.  Sound effects are played as DMA samples (not checked for the release).
+- The music and the sound effects play through the DSP (see below).  This is newer than release 0.1 and has only been
+  checked in Hatari.
 - The background does not scroll (`update_background` in `sources/atari/graphics.s`).
 - The bottom 16 lines of the X68000's 256-line picture are not shown.
 
@@ -42,8 +43,8 @@ may be newer than the release.
 
 ## Running
 
-Requirements: an Atari Falcon030 with 14 MB of RAM (4 MB is not enough: the program needs about 8.6 MB, of which about
-2.1 MB must be ST-RAM), and an RGB monitor or TV (256 x 240, 50 Hz) or a VGA monitor (256 x 240 line-doubled, 60 Hz).
+Requirements: an Atari Falcon030 with 14 MB of RAM (4 MB is not enough: the program needs about 11.2 MB, of which about
+4.6 MB must be ST-RAM), and an RGB monitor or TV (256 x 240, 50 Hz) or a VGA monitor (256 x 240 line-doubled, 60 Hz).
 The program's header lets TOS load it into TT-RAM if there is some (not tested).
 
 Start `SZ2.TOS` from the desktop, from a hard disk or a GEMDOS drive.  `DSPRITE.LOD` and the folders `BGM_DAT`,
@@ -109,20 +110,34 @@ F030Arcade's notes on its pinned Hatari build).
   registers.  The text layer uses compiled characters as well.
 - **The DSP** (`sources/atari/dsprite.asm`) keeps masks of the sprites of the last two frames.  The pixels that were
   covered before but are not now are sent to the 68030 as runs (offset and jump displacement), and the 68030 copies
-  those pixels from the background image with unrolled longword moves.
+  those pixels from the background image with unrolled longword moves.  The 1,885 sprite patterns have 1,372 different
+  masks; the 68030 sends each mask once, and a sprite's data holds the index of its mask.
+- **Sound** goes through the DSP: the crossbar sends DMA playback to the DSP's SSI receive and the DSP's SSI transmit to
+  the DAC, both at 25.175 MHz / 256 / 4 = 24,585 Hz.  The SSI transmit interrupt sends a word of a ring buffer and
+  stores the received word in its place, so the ring holds the sound effects behind the SSI; they play one ring (16 ms)
+  later, and the music is added to them there.  The effects (8-bit mono at 12,517 Hz in `PCM_DAT`) are converted to
+  16-bit stereo at 24,585 Hz when they are loaded (about 2.9 MB, and about 2 s of loading time in Hatari).
+- **Music:** the game's music driver, MCDRV (`sources/mcdrv.s`, disassembled), runs on the 68030 as on the X68000,
+  called through `trap #4`.  Its YM2151 register writes become a stream for the DSP (`sources/atari/music.s`), and its
+  timer interrupt is run in DSP time, a little ahead of the DSP, whenever the DSP asks for more.  The DSP plays the
+  stream with a YM2151 of its own (`sources/atari/opm16_*.asm`, from `tools/opm16`): 8 channels of 4 operators,
+  rendered in blocks of 48 samples between its sprite work.  The music takes about half of the DSP and, in the
+  Musashi emulator, 1-7% of the 68030.
 - **Scheduling:** the renderer runs in the VBL handler as a chain of stages and yields at display line 170 (counted by
   Timer B, one or two events a line, detected each frame), so that the game gets the rest of the frame.
 - **The machine** (`machine.s`): the Videl modes and the interrupt vectors; `input.s` the IKBD (keyboard, joystick,
-  mouse); `audio.s` the sample buffer.  `sources/atari/adpcm.s` is a separate tool that turned the X68000's ADPCM
-  sound effects into the samples in `PCM_DAT`.
+  mouse); `audio.s` the sample buffer and the conversion of the effects.  `sources/atari/adpcm.s` is a separate tool
+  that turned the X68000's ADPCM sound effects into the samples in `PCM_DAT`.
 
 ## Layout
 
     sources/sz2.s          the game: disassembly of SZ2.X (X68000) with the Atari patches
+    sources/mcdrv.s        the music driver: disassembly of MCDRV.X (X68000) with the Atari patches
     sources/sincos.dat     sine/cosine tables for the Atari build
     sources/atari/         the Falcon port: main.s (start), emulator.s (DOS/IOCS calls, VBL), mem_map.s (X68000
                            memory areas), graphics.s (renderer), dsprite.asm (DSP program), machine.s (Videl, MFP),
-                           input.s (IKBD), audio.s, adpcm.s (ADPCM to sample tool), ioequ.inc (DSP equates)
+                           input.s (IKBD), audio.s, music.s (MCDRV to DSP), opm16_*.asm (the DSP's YM2151),
+                           adpcm.s (ADPCM to sample tool), ioequ.inc (DSP equates)
     sources/x68000/        mem_map.s for the X68000 build
     sources/XSP200_2/      the XSP 2.00 sprite library the game uses (sources and Japanese documentation)
     sources/amiga/         the start of an Amiga port
@@ -131,13 +146,16 @@ F030Arcade's notes on its pinned Hatari build).
     binaries/amiga/        the game's data for an Amiga port
     binaries/x68000/       the X68000 disks (CH68_101_A: system, CH68_101_B: game) and the original SZ2.X as hex
     docs/                  the X68000 I/O map (_IOMAP.MAN.txt) and the README's screenshots
-    tools/                 vasm, vlink, Motorola's DSP56000 assembler and cldlod, human68k-ld and -objcopy
+    tools/                 vasm, vlink, Motorola's DSP56000 assembler and cldlod, human68k-ld and -objcopy;
+                           tools/mcdrv (unpacking, disassembling and running MCDRV), tools/opm16 (the DSP's YM2151:
+                           test program, C++ model, tables), check_dsp_listing.py (run by the build scripts)
     build.sh build_mac.sh build_win.sh     the build scripts (Linux, macOS, Windows)
 
 ## Copyright
 
 Cho Ren Sha 68k and the XSP sprite library are by Famibe No Yosshin (1995 and 1997).  The game's code (in
 `sources/sz2.s`), its graphics, sound and data (`binaries/*/..._DAT`) and the screenshots belong to their author.
+MCDRV (in `sources/mcdrv.s`) is by CUL (1993-97).
 The X68000 system files on the disk in `binaries/x68000/CH68_101_A` belong to their owners, and the tools in `tools/`
 to theirs (vasm and vlink: Volker Barthelmann and Frank Wille; the DSP56000 assembler: Motorola).  The Atari port's
 own code is by Sascha Springer.  This repository has no license file yet.

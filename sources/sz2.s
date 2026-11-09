@@ -12196,6 +12196,17 @@ L_0002633E:
 
 	addq.w  #$4,A7                                  ; 000263BE 584F
 
+	ifd __ATARI__
+
+	move.l	-516(a6),d0 ; Convert for the DSP (16-bit stereo, 24585 Hz).
+	asl.l	#4,d0
+	movea.l	d6,a0
+	adda.l	d0,a0
+	jsr		convert_pcm_sample
+
+	endif
+
+
 	bra.s   L_000263E2                              ; 000263C0 6020
 
 L_000263C2:

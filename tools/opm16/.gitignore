@@ -1,0 +1,14 @@
+opm16_tab.asm
+opm16_tab.bin
+opm16_tab.h
+opm16_cfg.asm
+opm16.cld
+opm16.lst
+OPM16.LOD
+opmplay.o
+OPMPLAY.PRG
+model2
+*.BIN
+*.wav
+v_*/
+prof*/

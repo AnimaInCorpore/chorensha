@@ -4,7 +4,6 @@
 	xdef timer_b_handler
 	xdef line_f_handler
 	xdef trap_2_handler
-	xdef trap_4_handler
 	xdef trap_f_handler
 
 	xdef game_heap_address
@@ -57,6 +56,7 @@ vbl_handler:
 	clr.l	$ffff9800.w
 	
 	bsr		joypad_handler
+	jsr		send_music_packet
 	bsr		graphics_engine
 
 ;	not.l	$ffff9800.w
@@ -405,11 +405,6 @@ trap_2_handler:
 
 ; ------------------------------------------------------------------------------
 
-trap_4_handler:
-	rte
-
-; ------------------------------------------------------------------------------
-
 trap_f_handler:
 	cmp.b	#$4,d0 ; _BITSNS
 	bne		.no_bitsns
@@ -499,7 +494,8 @@ trap_f_handler:
 
 	clr		$ffff8900.w
 
-	move.b	#$81,$ffff8921.w ; Mono & 12571 Hz.
+	; The samples were converted to 16-bit stereo at 24585 Hz on loading
+	; (convert_pcm_sample); the DMA plays them into the DSP.
 
 	move.l	a1,d0
 	move.b	d0,$ffff8907.w
