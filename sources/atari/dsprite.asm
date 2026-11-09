@@ -13,6 +13,7 @@ RLE_LONG_EVEN_BIAS equ RLE_RESTORE_WIDTH+4 ; Odd-run block plus its preceding BR
 RLE_LINE_BYTES equ 512*2 ; One screen line, including the part right of the restore area.
 RLE_MAX_OFFSET equ $7fff ; The 68030 adds offsets with ADDA.W.
 RLE_GAP_SPLIT equ RLE_MAX_OFFSET+1-RLE_LINE_BYTES ; A gap this long is sent before it can overflow.
+RLE_CHUNK_SHIFT equ $000020 ; MPY by this: a1 = the top 6 bits, a0 = the rest shifted up.
 
 push	macro	register
         move    register,y:-(r7)
@@ -37,9 +38,11 @@ peek	macro	register
 ; -----------------------------------------------------------------------------
 
 main:
+	movep	#0,x:m_bcr ; Reset leaves 15 wait states on every external access.
 	movep	#1,x:m_pbc
 	bclr	#m_hf2,x:m_hcr
 	move	#<stack,r7
+	move	#1,m3 ; r3 toggles between the two run states.
 
 	move	#0,x0
 	jsr		<fill_screen_buffer
@@ -366,15 +369,26 @@ _loop:
 
 ; -----------------------------------------------------------------------------
 
+; Scan the mask of the pixels to restore, from the left, and write each run as
+; the byte offset from the end of the previous run, then its length in bytes.
+; The scan clears the mask.
+;
+; x0 holds the run state, all zeros outside a run and all ones inside, so a
+; word without a run boundary XORs to zero: the common case, four cycles.
+; In other words each set bit of t = w ^ (w >> 1) (w XORed with the state)
+; is a boundary. t is taken apart in four 6-bit chunks, and two tables give
+; the first boundary of a chunk (X) and the chunk without it (Y).
+
 create_rle_data:
 	move	#screen_buffer+(16+256+16)/8/3*16,r4
 	move	#rle_buffer,r5
+	move	#<rle_chunk_tables,r0
+	move	#<rle_states,r3
 
-	clr		b
-	move	b1,x0
-	move	#>1*2,x1
+	clr		b ; Bytes since the last boundary.
+	move	b1,x0 ; Outside a run.
 	move	#>24*2,y0
-	move	#>(512-(16+256+16))*2,y1
+	move	#>RLE_CHUNK_SHIFT,y1
 
 	do		#240,_loop
 
@@ -382,53 +396,21 @@ create_rle_data:
 
 	do		#(16+256+16)/8/3,_loop2
 
-	tst		a a0,y:(r4)+
-	jeq		<_skip_empty_data
-
-	do		#24,_loop3
-
-	rol		a
-	jcc		<_transparent_pixel
-
-	bset	#0,x0
-	jcs		<_next_pixel
-
-	clr		b b1,y:(r5)+
-
-	jmp		<_next_pixel
-
-_transparent_pixel:
-	bclr	#0,x0
-	jcc		<_next_pixel
-
-	clr		b b1,y:(r5)+
-
-_next_pixel:
-	add		x1,b
-_loop3:
-	
-	jmp		<_skip_non_empty_data
-
-_skip_empty_data:
-	bclr	#0,x0
-	jcc		<_next_word
-
-	clr		b b1,y:(r5)+
-
+	eor		x0,a a0,y:(r4)+
+	jne		<_boundaries
 _next_word:
-	add		y0,b
-
-_skip_non_empty_data:
-	move	y:(r4),a
+	add		y0,b y:(r4),a
 _loop2:
 
-	bclr	#0,x0
-	jcc		<_next_line
+	jclr	#0,x0,_next_line
 
-	clr		b b1,y:(r5)+
+	clr		b b1,y:(r5)+ ; The run ends with the line.
+	move	(r3)+
+	move	b1,x0
 
 _next_line:
-	add		y1,b #>RLE_GAP_SPLIT,a
+	move	#>(512-(16+256+16))*2,x1
+	add		x1,b #>RLE_GAP_SPLIT,a
 
 	; No run is open at the end of a line. Send a long gap now as an
 	; offset with an empty run, so that every offset fits in 16 bits:
@@ -455,6 +437,38 @@ _loop:
 	move	a1,y:rle_length
 
 	rts
+
+; a1 = the word XORed with the state, not zero. b counts from the chunk start
+; here: a boundary at pixel p writes b+2p and sets b to -2p. Each boundary
+; flips the state in r3.
+
+_boundaries:
+	lsr		a a1,x1
+	eor		x1,a
+	move	a1,x1
+	mpy		x1,y1,a ; a1 = first chunk (signed), a0 = the rest.
+	move	#>6*2,x0
+
+	do		#4,_loop3
+
+	move	a1,n0
+	move	a0,x1
+	jset	#23,x:(r0+n0),_next_chunk ; No boundary in this chunk.
+
+_next_boundary:
+	move	x:(r0+n0),a
+	add		a,b y:(r0+n0),n0
+	tfr		a,b b1,y:(r5)+
+	neg		b (r3)+
+	jclr	#23,x:(r0+n0),_next_boundary
+
+_next_chunk:
+	mpy		x1,y1,a
+	add		x0,b
+_loop3:
+
+	sub		y0,b x:(r3),x0 ; _next_word adds the word again.
+	jmp		<_next_word
 
 ; -----------------------------------------------------------------------------
 
@@ -705,6 +719,26 @@ number_of_work_sprite_infos:
 number_of_display_sprite_infos:
 	dc		0
 
+; Run scan tables for a 6-bit chunk c of boundaries (bit 5 first), indexed
+; by c as a signed number from rle_chunk_tables. X and Y use the same
+; addresses. X: twice the pixel of the first boundary; bit 23 set means c
+; has none. Y: c without its first boundary.
+
+	org	x:$40
+
+rle_chunk_boundaries:
+	dc		0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0 ; c = 32..63
+	dc		0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+	dc		$800000,10,8,8,6,6,6,6,4,4,4,4,4,4,4,4 ; c = 0..31
+	dc		2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2
+
+rle_chunk_tables equ rle_chunk_boundaries+32
+
+	org	x:$80 ; Modulo 2 with r3.
+
+rle_states:
+	dc		$000000,$ffffff
+
 ; -----------------------------------------------------------------------------
 	org	x:$4000 ; External X RAM.
 ; -----------------------------------------------------------------------------
@@ -755,6 +789,14 @@ scrolling_offset:
 
 	ds		10
 stack:
+
+	org	y:$40 ; Same addresses as rle_chunk_boundaries.
+
+rle_chunk_rests:
+	dc		0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15 ; c = 32..63
+	dc		16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31
+	dc		0,0,0,1,0,1,2,3,0,1,2,3,4,5,6,7 ; c = 0..31
+	dc		0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15
 
 ; -----------------------------------------------------------------------------
 	org	y:$4000 ; External Y RAM.
