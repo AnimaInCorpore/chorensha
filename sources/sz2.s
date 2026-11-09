@@ -360,6 +360,9 @@ XSP_VSYNC:
 	bra.s   L_0002021A                              ; 00020208 6010
 
 L_0002020A:
+	ifd __ATARI__
+	jsr		music_idle ; MCDRV's ticks while the game waits (atari/music.s).
+	endif
 	cmp.w   VBL_VWAIT_COUNTER(pc),D0                    ; 0002020A B07A 1FDE
 	bhi.s   L_0002020A                              ; 0002020E 62FA
 

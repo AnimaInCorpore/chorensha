@@ -22,7 +22,7 @@ A beta.  The game runs, but it has not been played through, and the changes made
 monitor (50 Hz) and on a VGA monitor (60 Hz).
 
 In the attract mode in Hatari the game logic runs every VBL.  Over the first 40 s of the stage 1 demo on RGB, the
-picture keeps up with about 73% of the frames (about 36 pictures a second); before the music it was 86% (about 43).
+picture keeps up with about 77% of the frames (about 39 pictures a second); before the music it was 86% (about 43).
 VGA has not been measured since the music.  These are Hatari figures, not measurements on real hardware.
 
 Known limitations:
@@ -119,7 +119,8 @@ F030Arcade's notes on its pinned Hatari build).
   16-bit stereo at 24,585 Hz when they are loaded (about 2.9 MB, and about 2 s of loading time in Hatari).
 - **Music:** the game's music driver, MCDRV (`sources/mcdrv.s`, disassembled), runs on the 68030 as on the X68000,
   called through `trap #4`.  Its YM2151 register writes become a stream for the DSP (`sources/atari/music.s`), and its
-  timer interrupt is run in DSP time, a little ahead of the DSP, whenever the DSP asks for more.  The DSP plays the
+  timer interrupt is run in DSP time, a little ahead of the DSP: mostly while the game waits for the next VBL, one tick
+  at a time, so that it does not take the renderer's time; else when the DSP asks for more.  The DSP plays the
   stream with a YM2151 of its own (`sources/atari/opm16_*.asm`, from `tools/opm16`): 8 channels of 4 operators,
   rendered in blocks of 48 samples between its sprite work.  The music takes about half of the DSP and, in the
   Musashi emulator, 1-7% of the 68030.

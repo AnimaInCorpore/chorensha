@@ -5,14 +5,16 @@
 ; The game calls MCDRV through trap #4. MCDRV's OPM register writes go into a
 ; ring of DSP stream words: $00rrdd sets register rr to dd, $80nnnn waits n
 ; blocks (48 frames at 24585 Hz, about 2 ms). The timer registers stay here:
-; timer A is MCDRV's clock. When the DSP asks for music (HF3, while it holds
-; less than its lead), send_music_packet has music_generate run MCDRV's
-; timer interrupt at timer A's rate in DSP time, writing waits between the
-; ticks, until the ring is MUSIC_LEAD blocks ahead of what the DSP has been
-; sent, and sends the ring.
+; timer A is MCDRV's clock. MCDRV's timer interrupt runs at timer A's rate in
+; DSP time, writing waits between the ticks: mostly in the game's VSYNC wait
+; (music_idle), up to MUSIC_IDLE_LEAD blocks ahead of what the DSP has been
+; sent, else when the DSP asks for music (HF3, while it holds less than its
+; lead) and the ring is short of MUSIC_LEAD blocks (music_generate, from
+; send_music_packet). send_music_packet then sends the ring.
 
 	xdef music_init
 	xdef music_generate
+	xdef music_idle
 	xdef music_opm_write
 	xdef send_music_packet
 	xdef trap_4_handler
@@ -25,7 +27,8 @@
 
 MUSIC_RING_SIZE=4096 ; Stream words.
 MUSIC_RING_RESERVE=1024 ; Room left for a timer tick (a song start writes a few hundred).
-MUSIC_LEAD=16 ; Blocks generated ahead of what the DSP has been sent.
+MUSIC_LEAD=16 ; Blocks generated ahead of what the DSP has been sent, at least.
+MUSIC_IDLE_LEAD=32 ; And in the game's idle time.
 MUSIC_PACKET=64 ; At most this many words a packet (dsprite.asm MUSIC_PACKET).
 MUSIC_PACKETS=4 ; At most this many packets a call.
 TIMER_A_STEP=35197201 ; A timer A step (64 / 4 MHz) in blocks, 0.32 fixed point.
@@ -65,21 +68,66 @@ trap_4_handler:
 
 ; Run MCDRV's timer interrupt until the ring is MUSIC_LEAD blocks ahead of
 ; what the DSP has been sent. Not while the game is in MCDRV (on the X68000,
-; MCDRV masks the OPM interrupt for that).
+; MCDRV masks the OPM interrupt for that), nor while music_idle runs it.
 
 music_generate:
 	tst.b	music_busy
 	bne		.exit
 
-	movem.l	d0-d3/a0,-(sp)
+	movem.l	d0-d5/a0,-(sp)
+	moveq	#MUSIC_LEAD,d4
+	moveq	#-1,d5 ; As many ticks as it takes.
+	bsr		generate_ticks
+	movem.l	(sp)+,d0-d5/a0
 
+.exit:
+	rts
+
+; From the game's VSYNC wait (sz2.s XSP_VSYNC): MCDRV's timer interrupt in the
+; time the game would spin anyway, up to MUSIC_IDLE_LEAD blocks ahead, so that
+; the VBL seldom runs it in the renderer's time. One tick a call (about
+; 0.4 ms), so that the game leaves its wait soon after the VBL. Keeps all
+; registers.
+
+music_idle:
+	tst.b	music_busy
+	bne		.exit
+
+	btst	#0,timer_control ; Anything to do? Asked without taking music_busy,
+	beq		.exit ; which keeps the VBL from generating.
+
+	move.l	d0,-(sp)
+	move.l	music_block,d0
+	sub.l	music_sent_blocks,d0
+	cmp.l	#MUSIC_IDLE_LEAD,d0
+	movem.l	(sp)+,d0 ; Keeps the flags.
+	bge		.exit
+
+	addq.b	#1,music_busy ; The VBL generates nothing meanwhile.
+	movem.l	d0-d5/a0,-(sp)
+	moveq	#MUSIC_IDLE_LEAD,d4
+	moveq	#1,d5
+	bsr		generate_ticks
+	movem.l	(sp)+,d0-d5/a0
+	subq.b	#1,music_busy
+
+.exit:
+	rts
+
+; d4 = how many blocks ahead to stop, d5 = at most this many ticks (-1: no
+; limit).
+
+generate_ticks:
 .tick:
 	btst	#0,timer_control ; Timer A loaded?
 	beq		.done
 
+	subq.l	#1,d5
+	bcs		.done
+
 	move.l	music_block,d0
 	sub.l	music_sent_blocks,d0
-	cmp.l	#MUSIC_LEAD,d0
+	cmp.l	d4,d0
 	bge		.done
 
 	move.l	music_read,d0 ; Room in the ring.
@@ -124,9 +172,6 @@ music_generate:
 	jmp		mcdrv_tick
 
 .done:
-	movem.l	(sp)+,d0-d3/a0
-
-.exit:
 	rts
 
 ; ------------------------------------------------------------------------------
@@ -247,6 +292,9 @@ ring_put:
 send_music_packet:
 	btst	#4,$ffffa202.w ; HF3.
 	beq		.exit
+
+	btst	#4,$ffffa200.w ; HF1: the 68030 takes the restore runs; a packet now
+	bne		.exit ; would block both sides.
 
 	movem.l	d0-d3/a0-a1,-(sp)
 
