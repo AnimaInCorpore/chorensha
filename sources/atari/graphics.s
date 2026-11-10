@@ -1300,7 +1300,7 @@ process_sprite_infos:
 	cmp		drawn_list_serial,d0
 	bne.s	.new
 
-	move	vbl_wait_counter,d0
+	move	renderer_vbls,d0
 	sub		drawn_list_vbl,d0
 	cmp		#REDRAW_VBLS,d0
 	bcs		.not_now
@@ -1318,7 +1318,7 @@ process_sprite_infos:
 
 .start:
 	move	game_list_serial,drawn_list_serial
-	move	vbl_wait_counter,drawn_list_vbl
+	move	renderer_vbls,drawn_list_vbl
 
 	move.l	SPRITE_DATA_ADDRESS,a1
 
@@ -2191,6 +2191,8 @@ render_idle:
 restart_raster_throttle:
 	movem.l	d0-d1,-(sp)
 
+	addq	#1,renderer_vbls
+
 	move	raster_interrupts,d0 ; Timer B interrupts in the last frame.
 	clr		raster_interrupts
 	mulu	#SPRITE_THROTTLE_DISPLAY_LINES,d0
@@ -2419,7 +2421,10 @@ game_list_serial: ; Sprite lists the game has finished (prepare_sprite_infos).
 drawn_list_serial: ; The one the current or last picture draws.
 	ds		1
 
-drawn_list_vbl: ; vbl_wait_counter when that picture began.
+drawn_list_vbl: ; renderer_vbls when that picture began.
+	ds		1
+
+renderer_vbls: ; VBLs, for the timed redraw (the game's WAIT_VBL clears vbl_wait_counter).
 	ds		1
 
 renderer_lock: ; The game's VSYNC wait renders (render_idle): not the VBL.
