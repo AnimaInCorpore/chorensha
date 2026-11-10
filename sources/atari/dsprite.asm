@@ -39,6 +39,7 @@ RLE_LINE_BYTES equ 512*2 ; One screen line, including the part right of the rest
 RLE_MAX_OFFSET equ $7fff ; The 68030 adds offsets with ADDA.W.
 RLE_GAP_SPLIT equ RLE_MAX_OFFSET+1-RLE_LINE_BYTES ; A gap this long is sent before it can overflow.
 RLE_CHUNK_SHIFT equ $000020 ; MPY by this: a1 = the top 6 bits, a0 = the rest shifted up.
+RLE_ROOM equ 1200 ; Four lines add at most 4*291 values, and the scan frees 48 words.
 MAX_SPRITES equ 512
 
 ; Sound: the SSI sends the ring to the DAC and receives the sound effects
@@ -79,6 +80,8 @@ sprite_convert_shifts equ $40b0 ; 2 words.
 rle_length equ $40b2
 scrolling_offset equ $40b3
 ssi_status equ $40b4
+rle_lines equ $40b5 ; Lines of the mask not scanned yet.
+rle_reader equ $40b6 ; The scan's place in the mask.
 stack equ $4100 ; The stack grows down from here (y:-(r7)).
 rle_chunk_boundaries equ $4100 ; X and Y at the same addresses.
 rle_chunk_tables equ rle_chunk_boundaries+32
@@ -292,6 +295,13 @@ _loop:
 ; the byte offset from the end of the previous run, then its length in bytes.
 ; The scan clears the mask.
 ;
+; The values may run past rle_buffer into the mask's lines that are already
+; scanned, but must not catch up with the scan: pictures with many runs (long
+; lasers) would lose the mask of their lower lines, and the sprites there
+; would stay on the screen for good. So the scan stops when the room gets
+; short (rle_full), the runs so far go out as a list of their own, and the
+; scan goes on from there (the main loop).
+;
 ; x0 holds the run state, all zeros outside a run and all ones inside, so a
 ; word without a run boundary XORs to zero: the common case, four cycles.
 ; In other words each set bit of t = w ^ (w >> 1) (w XORed with the state)
@@ -299,7 +309,7 @@ _loop:
 ; the first boundary of a chunk (X) and the chunk without it (Y).
 
 create_rle_data:
-	move	#screen_buffer+(16+256+16)/8/3*16,r4
+	move	y:rle_reader,r4
 	move	#rle_buffer,r5
 	move	#rle_chunk_tables,r0
 	move	#<rle_states,r3
@@ -309,13 +319,24 @@ create_rle_data:
 	move	b1,x0 ; Outside a run.
 	move	#>24*2,y0
 	move	#>RLE_CHUNK_SHIFT,y1
+	move	y:rle_lines,x1
 
-	do		#240/16,_blocks
+	do		x1,_lines
 
+	; Every fourth line: stop if the values could catch up with the scan
+	; (rle_full); every sixteenth: the music.
+
+	jset	#0,lc,_scan
+	jset	#1,lc,_scan
+	move	r4,a
+	move	r5,x1
+	sub		x1,a #>RLE_ROOM,x1
+	cmp		x1,a
+	jlt		>rle_full
+	jset	#2,lc,_scan
+	jset	#3,lc,_scan
 	jsr		music_poll
-
-	do		#16,_loop
-
+_scan:
 	move	y:(r4),a
 
 	do		#(16+256+16)/8/3,_loop2
@@ -348,23 +369,10 @@ _next_line:
 
 _next_line2:
 	nop
-_loop:
-	nop
-_blocks:
+_lines:
 
-	clr		b
-	move	b1,y:(r5)+ ; Offset.
-	move	#>12,b
-	move	b1,y:(r5)+ ; Jump displacement past the 68030 RLE loop.
-
-	move	#rle_buffer,x0
-	move	r5,a
-	sub		x0,a
-	move	a1,y:rle_length
-
-	move	#>-1,m3
-
-	rts
+	move	#0,x1 ; All lines scanned.
+	jmp		>rle_end
 
 ; a1 = the word XORed with the state, not zero. b counts from the chunk start
 ; here: a boundary at pixel p writes b+2p and sets b to -2p. Each boundary
@@ -717,9 +725,18 @@ _loop:
 	move	#>POLL_URGENT,x0 ; The 68030 waits for the runs.
 	move	x0,x:<poll_need
 	jsr		<draw_inverted_masks
+	jsr		rle_start
+_runs:
 	jsr		<create_rle_data
 	jsr		convert_rle_data
 	jsr		send_rle_data
+	move	y:rle_lines,a
+	tst		a
+	jeq		_sent
+	move	#>POLL_URGENT,x0 ; More lines: the 68030 waits for the next list.
+	move	x0,x:<poll_need
+	jmp		_runs
+_sent:
 	jsr		swap_sprite_infos
 	move	#>SEG,x0 ; Render as soon as the SSI has left a segment,
 	move	x0,x:<poll_need ; and take music meanwhile (until the next
@@ -888,11 +905,52 @@ ssi_tx_exception:
 
 ; -----------------------------------------------------------------------------
 
-; Send the count of the runs, wait for the 68030's HF1, then send the runs.
+; Start the scan of a picture's mask.
+
+rle_start:
+	move	#screen_buffer+(16+256+16)/8/3*16,r4
+	move	r4,y:rle_reader
+	move	#>240,x0
+	move	x0,y:rle_lines
+
+	rts
+
+; From create_rle_data: the list ends here. rle_full comes from inside the
+; line loop, before the line of its count; x1 = the lines still to scan. The
+; last run takes the gap so far as its offset, so that the next list starts
+; at the end of this one.
+
+rle_full:
+	move	lc,x1
+	enddo
+rle_end:
+	move	x1,y:rle_lines
+	move	r4,y:rle_reader
+
+	move	b1,y:(r5)+ ; Offset.
+	move	#>12,b
+	move	b1,y:(r5)+ ; Jump displacement past the 68030 RLE loop.
+
+	move	#rle_buffer,x0
+	move	r5,a
+	sub		x0,a
+	move	a1,y:rle_length
+
+	move	#>-1,m3
+
+	rts
+
+; Send the count of the runs (bit 15: another list follows for the lines
+; below), wait for the 68030's HF1, then send the runs.
 
 send_rle_data:
 	move	y:rle_length,a
 	asr		a ; Number of runs.
+	move	y:rle_lines,b
+	tst		b
+	jeq		_last
+	bset	#15,a1
+_last:
 
 	jclr	#1,x:m_hsr,*
 	movep	a1,x:m_htx
@@ -925,6 +983,21 @@ _top_up:
 	movep	y:(r4)+,x:m_htx
 _loop:
 
+	; Values behind rle_buffer lie in the mask: clear them, or they would
+	; be pixels to restore in the next picture.
+
+	move	#screen_buffer,x0
+	move	r4,a
+	sub		x0,a
+	jle		_clean
+
+	clr		b x0,r4
+
+	do		a1,_wipe
+	move	b1,y:(r4)+
+_wipe:
+
+_clean:
 	rts
 
 ; -----------------------------------------------------------------------------

@@ -1320,6 +1320,12 @@ process_sprite_infos:
 	move	game_list_serial,drawn_list_serial
 	move	renderer_vbls,drawn_list_vbl
 
+	move.l	#background_image+16*256*2*2,restore_background_address
+	move.l	work_screen_address,d0
+	add.l	#16*256*2*2,d0
+	move.l	d0,restore_screen_address
+	sf		restore_more
+
 	move.l	SPRITE_DATA_ADDRESS,a1
 
 	move.l	work_screen_address,a2
@@ -1659,11 +1665,12 @@ clear_sprites_dsp:
 
 .start:
 	lea		$ffffa204+2.w,a1
-	lea		background_image+16*256*2*2,a2
-	move.l	work_screen_address,a3
-	add.l	#16*256*2*2,a3
+	move.l	restore_background_address,a2
+	move.l	restore_screen_address,a3
 
-	move	(a1),d0 ; RLE count.
+	move	(a1),d0 ; RLE count; bit 15: the DSP sends another list after
+	bclr	#15,d0 ; this one (for a picture with very many runs).
+	sne		restore_more
 
 	; Restore now if the runs (about 16 a line) fit into the display lines
 	; left before the throttle line. Read Timer B's count before the stage:
@@ -1718,9 +1725,8 @@ clear_sprites_dsp:
 	movem.l	d0-a6,-(sp)
 
 	lea		$ffffa204+2.w,a1
-	lea		background_image+16*256*2*2,a2
-	move.l	work_screen_address,a3
-	add.l	#16*256*2*2,a3
+	move.l	restore_background_address,a2
+	move.l	restore_screen_address,a3
 
 .send_runs:
 	jsr		send_music_packet ; The DSP takes music while it waits for HF1.
@@ -1784,7 +1790,16 @@ clear_sprites_dsp:
 	move	transfer_sr,sr
 
 .unmasked:
+	tst.b	restore_more
+	beq.s	.restored
 
+	sf		restore_more ; The next list goes on where this one ended.
+	move.l	a2,restore_background_address
+	move.l	a3,restore_screen_address
+
+	bra		.wait_for_dsp_loop
+
+.restored:
 	move.l	work_sprite_infos_address_new,a0	
 	clr.l	(a0)
 	
@@ -2444,7 +2459,16 @@ transfer_sr:
 
 palette_translated: ; translated_palette_source is valid.
 	ds.b	1
+
+restore_more: ; The DSP sends another list of restore runs for this picture.
+	ds.b	1
 	even
+
+restore_background_address: ; Where the next list of restore runs starts.
+	ds.l	1
+
+restore_screen_address:
+	ds.l	1
 
 sprite_infos1: ; screen_address, palette_address, sprite_draw_address, sprite_clear_address.
 	ds.l	512*4+1
