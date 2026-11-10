@@ -135,7 +135,7 @@ music_welcome equ $3d ; Bit 0: in a wait that takes music packets.
 poll_need equ $3c ; music_poll renders once the SSI is this far past the next segment.
 
 POLL_URGENT equ 5*SEG ; While the 68030 waits for the runs: 3 segments left (6 ms).
-POLL_TRANSFER equ 4*SEG ; Before the transfer, which renders nothing: more than 4 left.
+POLL_TRANSFER equ 2*SEG ; Before the transfer, which renders nothing: more than 6 left.
 
 push	macro	register
         move    register,y:-(r7)
@@ -237,7 +237,10 @@ _start:
 
 	do		x0,_loop
 
+	jset	#0,lc,_no_poll ; Music every fourth sprite: a sprite takes
+	jset	#1,lc,_no_poll ; some 15 to 30 us, a block of music 2 ms.
 	jsr		music_poll
+_no_poll:
 	jsr		prepare_mask
 	jsr		sprite_position
 
@@ -411,7 +414,10 @@ _start:
 
 	do		x0,_loop
 
+	jset	#0,lc,_no_poll ; Music every fourth sprite: a sprite takes
+	jset	#1,lc,_no_poll ; some 15 to 30 us, a block of music 2 ms.
 	jsr		music_poll
+_no_poll:
 	jsr		prepare_mask
 	jsr		sprite_position
 
@@ -906,7 +912,7 @@ _go:
 
 	move	#>POLL_TRANSFER,x0 ; Top the ring up for the transfer.
 	move	x0,x:<poll_need
-	do		#3,_top_up
+	do		#5,_top_up
 	jsr		music_poll
 	nop ; No JSR at a loop's end.
 _top_up:

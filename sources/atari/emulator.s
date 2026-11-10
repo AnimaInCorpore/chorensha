@@ -48,6 +48,7 @@ vbl_handler:
 	move.b	display_window_address+1,$ffff8201.w
 	move.b	display_window_address+2,$ffff8203.w
 	move.b	display_window_address+3,$ffff820d.w
+	sf		flip_pending ; The renderer may draw into the other screen now.
 
 	addq	#1,vbl_wait_counter
 
@@ -56,8 +57,14 @@ vbl_handler:
 	clr.l	$ffff9800.w
 	
 	bsr		joypad_handler
+
+	tst.b	renderer_lock ; The game's VSYNC wait renders (render_idle), and
+	bne		.no_renderer ; it may be in the middle of a host port transfer.
+
 	jsr		send_music_packet
 	bsr		graphics_engine
+
+.no_renderer:
 
 ;	not.l	$ffff9800.w
 	
@@ -171,6 +178,7 @@ joypad_handler:
 
 timer_b_handler:
 	subq	#1,raster_stages_left ; Another SPRITE_THROTTLE_DISPLAY_LINES events.
+	addq	#1,raster_interrupts
 
 	rte
 

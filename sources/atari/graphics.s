@@ -7,6 +7,10 @@
 	xdef graphics_engine
 	xdef restart_raster_throttle
 	xdef raster_stages_left
+	xdef raster_interrupts
+	xdef render_idle
+	xdef renderer_lock
+	xdef flip_pending
 
 	xdef display_screen_address
 	xdef work_screen_address
@@ -19,6 +23,7 @@ SCREEN_DISPLAY_OFFSET=16*2+16*256*2*2
 TOTAL_NUMBER_OF_SPRITES=1885
 TOTAL_NUMBER_OF_CHARACTERS=128 ; 4096 / (4 * 8) = 128
 SPRITE_THROTTLE_DISPLAY_LINES=170 ; 240*3/4 = 180
+REDRAW_VBLS=4 ; A picture of an unchanged sprite list at most this often.
 MASK_HASH_SIZE=4096 ; Hash table for finding equal sprite masks.
 
 ; ------------------------------------------------------------------------------
@@ -26,6 +31,8 @@ MASK_HASH_SIZE=4096 ; Hash table for finding equal sprite masks.
 ; ------------------------------------------------------------------------------
 
 initialize_graphics:
+	bsr		build_cell_span
+
 	; Physbase.
 
 	move	#2,-(sp)
@@ -1269,6 +1276,7 @@ prepare_sprite_infos:
 	move.l	work_sprite_infos_address,d0
 	move.l	display_sprite_infos_address,work_sprite_infos_address
 	move.l	d0,display_sprite_infos_address
+	addq	#1,game_list_serial ; A new list for render_idle.
 	
 	movem.l	(sp)+,d0-a6
 
@@ -1281,16 +1289,23 @@ prepare_sprite_infos:
 ; ------------------------------------------------------------------------------
 
 process_sprite_infos:
-;	cmp.b	#255-SPRITE_THROTTLE_DISPLAY_LINES-60,$fffffa21.w
-;	bcc		.start_processing
-	
-;	move.l	#process_sprite_infos,next_graphics_routine
-	
-;	rts
-
-;.start_processing:
 	movem.l	d0-a6,-(sp)
 
+	; A picture of a new sprite list from the game; the same list again only
+	; after a few VBLs (for the text layer, in case the game stops sending
+	; sprites). Meanwhile the game gets the time: its VBL routine runs once
+	; the renderer returns.
+
+	move	game_list_serial,d0
+	cmp		drawn_list_serial,d0
+	bne.s	.new
+
+	move	vbl_wait_counter,d0
+	sub		drawn_list_vbl,d0
+	cmp		#REDRAW_VBLS,d0
+	bcs		.not_now
+
+.new:
 	move.l	display_sprite_infos_address,a0
 
 	clr.l	d7
@@ -1302,6 +1317,9 @@ process_sprite_infos:
 	rts
 
 .start:
+	move	game_list_serial,drawn_list_serial
+	move	vbl_wait_counter,drawn_list_vbl
+
 	move.l	SPRITE_DATA_ADDRESS,a1
 
 	move.l	work_screen_address,a2
@@ -1315,11 +1333,39 @@ process_sprite_infos:
 	move.l	work_sprite_infos_address_new,a4
 	lea		$ffffa204+2.w,a6
 
+	; The text lines with characters (bit 31 = line 0): the sprites that
+	; touch them mark their cells for prepare_text.
+
+	lea		text_bitmaps+32*4,a5
+	moveq	#0,d6
+	moveq	#32-1,d4
+
+.text_lines:
+	add.l	d6,d6
+	tst.l	(a5)+
+	beq.s	.no_text
+
+	addq.l	#1,d6
+
+.no_text:
+	dbf		d4,.text_lines
+
 	btst	#3,$ffffa202.w ; HF2: the DSP waits for a packet.
 	beq		*-6
 
-	jsr		send_music_packet
+	jsr		send_music_packet ; Masks the VBL for its own packets.
 
+	; The DSP renders no music during a transfer, which the 68030 paces: no
+	; VBL in between when render_idle sends (the VBL handler already runs
+	; at level 4).
+
+	move	sr,-(sp)
+	btst	#2,(sp)
+	bne.s	.masked
+
+	ori		#$0400,sr
+
+.masked:
 	move.l	d7,$ffffa204.w ; Send number of sprite infos to be sent to the DSP.
 
 	btst	#2,$ffffa202.w ; TRDY: it has taken the count; the rest goes unpolled.
@@ -1364,13 +1410,45 @@ process_sprite_infos:
 	move.l	(a5),(a4)+ ; Sprite draw address.
 	move.l	16(a5),(a4)+ ; Sprite restore address.
 
+	move	d5,d4
+	and		#$1ff,d4
+	move.l	(cell_span.l,d4.w*4),d4
+	and.l	d6,d4 ; Text lines the sprite touches.
+	bne.s	.cover
+
+.covered:
 	dbf		d7,.loop
+
+	move	(sp)+,sr
 
 	clr.l	(a4) ; End marker.
 
 	movem.l	(sp)+,d0-a6
 
 	bra		update_background
+
+.not_now:
+	movem.l	(sp)+,d0-a6
+
+	rts
+
+.cover:
+	move	d0,d1
+	and		#$1ff,d1
+	move.l	(cell_span.l,d1.w*4),d1 ; Its cells in a line.
+	beq.s	.covered
+
+.cover_line:
+	bfffo	d4{0:32},d2
+	moveq	#31,d3
+	sub		d2,d3
+	bclr	d3,d4
+	or.l	d1,(text_cover.l,d2.w*4)
+
+	tst.l	d4
+	bne.s	.cover_line
+
+	bra.s	.covered
 
 ; ------------------------------------------------------------------------------
 
@@ -1401,7 +1479,35 @@ translate_palettes:
 ;.start_translating:
 	movem.l	d0-a6,-(sp)
 
+	; Only if the game's palette has changed since the last translation
+	; (the translation table is fixed after initialize_graphics).
+
 	lea		L_00E82000+$200,a0
+	lea		translated_palette_source,a3
+
+	tst.b	palette_translated
+	beq.s	.translate
+
+	moveq	#16*16/2/4-1,d7
+
+.compare:
+	cmpm.l	(a0)+,(a3)+
+	bne.s	.changed
+	cmpm.l	(a0)+,(a3)+
+	bne.s	.changed
+	cmpm.l	(a0)+,(a3)+
+	bne.s	.changed
+	cmpm.l	(a0)+,(a3)+
+	dbne	d7,.compare
+	beq		.unchanged
+
+.changed:
+	lea		L_00E82000+$200,a0
+	lea		translated_palette_source,a3
+
+.translate:
+	st		palette_translated
+
 	lea		color_translation_table,a1
 	lea		translated_palettes,a2
 
@@ -1413,6 +1519,7 @@ translate_palettes:
 	rept 16
 
 	move	(a0)+,d0
+	move	d0,(a3)+
 	move	(a1,d0.l*2),d1
 	move	d1,(a2)+
 	move	d1,(a2)+
@@ -1421,16 +1528,17 @@ translate_palettes:
 
 	dbf		d7,.loop
 
+.unchanged:
 	movem.l	(sp)+,d0-a6
 
-	bra		clear_text
+	bra		prepare_text
 
 ; ------------------------------------------------------------------------------
 
 clear_text:
 	movem.l	d0-a6,-(sp)
 
-	move.l	work_text_infos_address,a3
+	lea		text_infos,a3
 	
 	bra		.start
 
@@ -1478,9 +1586,6 @@ clear_text:
 .start2:
 	move.l	(a3)+,d0
 	bne		.loop
-
-	move.l	work_text_infos_address,a0	
-	clr.l	(a0)
 
 	movem.l	(sp)+,d0-a6
 
@@ -1569,9 +1674,29 @@ clear_sprites_dsp:
 	move	raster_stages_left,d2
 	ble		.defer_rle
 
+	move	raster_interrupts,d3
+	cmp		raster_stages,d3
+	bcs.s	.before_throttle
+
+	; Past the throttle line, on render_idle's budget: Timer B counts
+	; towards an event behind the VBL, so take the events left in the
+	; frame, as the runs must not hold the VBL off.
+
+	addq	#1,d3
+	mulu	#SPRITE_THROTTLE_DISPLAY_LINES,d3
+	sub		d1,d3 ; Events since the VBL.
+	move	frame_events,d2
+	sub		d3,d2
+	bgt.s	.events_left
+
+	bra.s	.defer_rle
+
+.before_throttle:
 	subq	#1,d2
 	mulu	#SPRITE_THROTTLE_DISPLAY_LINES,d2
 	add		d1,d2
+
+.events_left:
 	move	raster_stages,d1
 	subq	#1,d1
 	lsr		d1,d2 ; Display lines left (two events a line when doubled).
@@ -1582,6 +1707,7 @@ clear_sprites_dsp:
 	bcs		.send_runs
 
 .defer_rle:
+	st		runs_wait_vbl ; Not from render_idle before the VBL.
 	move.l	#.clear_sprites_dsp2,next_graphics_routine
 	
 	movem.l	(sp)+,d0-a6
@@ -1599,6 +1725,14 @@ clear_sprites_dsp:
 .send_runs:
 	jsr		send_music_packet ; The DSP takes music while it waits for HF1.
 
+	move	sr,transfer_sr ; No VBL during the transfer (see process_sprite_infos);
+	st		transfer_masked ; .skip restores the level.
+	btst	#2,transfer_sr
+	bne.s	.masked
+
+	ori		#$0400,sr
+
+.masked:
 	bset	#4,$ffffa200.w ; HF1: the DSP may send the runs now; it
 	btst	#0,$ffffa202.w ; renders no music while it does, so after the
 	beq		*-6 ; first word they come without polling.
@@ -1643,81 +1777,213 @@ clear_sprites_dsp:
 .skip:
 	bclr	#4,$ffffa200.w
 
+	tst.b	transfer_masked
+	beq.s	.unmasked
+
+	sf		transfer_masked
+	move	transfer_sr,sr
+
+.unmasked:
+
 	move.l	work_sprite_infos_address_new,a0	
 	clr.l	(a0)
 	
 	movem.l	(sp)+,d0-a6
 
-	bra		prepare_text
+	bra		draw_text
 
 ; ------------------------------------------------------------------------------
 
 prepare_text:
 	movem.l	d0-a6,-(sp)
 
-	move.l	#text_bitmaps,a0
+	; The text work of this picture, from what the work screen shows
+	; (its text state) and what the game wants now. A cell whose character
+	; has changed gets the old one restored (clear_text, before the
+	; sprites) and the new one drawn (draw_text, after the restore runs).
+	; An unchanged cell is drawn again only if sprites touch it: those of
+	; this picture, or those of the screen's last picture, which the
+	; restore runs take away together with the character's pixels on them.
+	; All other text stays as it is on the screen.
+	;
+	; The text cells do not follow the background position (which is
+	; always 0, see update_background); process_sprite_infos marks the
+	; cells by the sprites' coordinates.
+
+	lea		text_bitmaps+32*4,a0 ; The cells with a character, per line.
 	lea		text_matrix,a1
 	move.l	TEXT_GRAPHICS_ADDRESS,a2
-	move.l	work_text_infos_address,a3
-	lea		background_image+SCREEN_DISPLAY_OFFSET,a4
+	move.l	work_text_state_address,a3
+	lea		TEXT_STATE_LINES(a3),a6
+	lea		text_infos,a4
 	move.l	work_screen_address,a5
+	move.l	#background_image,d7
+	sub.l	a5,d7 ; From a screen address to the background's.
 	add.l	#SCREEN_DISPLAY_OFFSET,a5
 
-	move	#32-1,d7
+.line:
+	move.l	(a0),d2 ; Wanted.
+	move.l	text_cover-text_bitmaps-32*4(a0),d1
+	clr.l	text_cover-text_bitmaps-32*4(a0)
+	move.l	4(a6),d0
+	move.l	d1,4(a6) ; For this screen's next picture.
+	or.l	d0,d1 ; Touched by sprites.
+	move.l	(a6),d3 ; Shown.
+	move.l	d2,d0
+	or.l	d3,d0
+	beq		.skip_line
 
-.lines_loop:
-	move.l	(a0),d0
-	beq		.skip_line	
+	moveq	#32-1,d6 ; The cell's bit.
 
-	move	#32-1,d6
+.cell:
+	btst	d6,d0
+	beq.s	.next_cell
 
-.characters_loop:
-	add.l	d0,d0
-	bcc		.skip_character
+	moveq	#0,d4
+	move.b	(a3),d4 ; Shown (0: none).
+	moveq	#0,d5
+	btst	d6,d2
+	beq.s	.compare
 
-	move.l	a5,(a3)+
-	move.l	a4,(a3)+
+	move.b	(a1),d5 ; Wanted.
 
-	clr		d1
-	move.b	(a1),d1
-	lsl		#5,d1
-	move.l	(a2,d1.w),(a3)+
-	move.l	4(a2,d1.w),(a3)+
-	
-.skip_character:
+.compare:
+	cmp.b	d4,d5
+	bne.s	.changed
+
+	btst	d6,d1
+	beq.s	.next_cell
+
+	lsl		#5,d5
+	beq.s	.next_cell
+
+	move.l	a5,(a4)+ ; Draw it again.
+	clr.l	(a4)+
+	move.l	(a2,d5.w),(a4)+
+	move.l	#text_no_restore,(a4)+
+
+	bra.s	.next_cell
+
+.changed:
+	move.b	d5,(a3)
+	bclr	d6,d3
+
+	move.l	a5,(a4)+
+	move.l	a5,(a4)
+	add.l	d7,(a4)+
+
+	move.l	#text_no_draw,(a4)
+	lsl		#5,d5
+	beq.s	.no_draw
+
+	bset	d6,d3
+	move.l	(a2,d5.w),(a4)
+
+.no_draw:
+	addq.l	#4,a4
+
+	move.l	#text_no_restore,(a4)
+	lsl		#5,d4
+	beq.s	.no_restore
+
+	move.l	4(a2,d4.w),(a4)
+
+.no_restore:
+	addq.l	#4,a4
+
+.next_cell:
 	addq.l	#1,a1
-	add.l	#8*2,a4
-	add.l	#8*2,a5
+	addq.l	#1,a3
+	lea		8*2(a5),a5
 
-	dbf		d6,.characters_loop
+	dbf		d6,.cell
 
-	add.l	#256*2*2*8-256*2,a4
-	add.l	#256*2*2*8-256*2,a5
+	move.l	d3,(a6)
+	lea		256*2*2*8-256*2(a5),a5
 
-	bra		.next_line
+	bra.s	.next_line
 
 .skip_line:
-	add.l	#32,a1
-	add.l	#256*2*2*8,a4
-	add.l	#256*2*2*8,a5
+	lea		32(a1),a1
+	lea		32(a3),a3
+	lea		256*2*2*8(a5),a5
 
 .next_line:
-	move.l	32*4(a0),(a0)+
+	addq.l	#4,a0
+	addq.l	#8,a6
 
-	dbf		d7,.lines_loop
+	cmp.l	#text_bitmaps+2*32*4,a0
+	bne		.line
 
-	clr.l	(a3) ; End marker.
+	clr.l	(a4) ; End marker.
 
 	movem.l	(sp)+,d0-a6
-	
-	bra		draw_text
+
+	bra		clear_text
+
+text_no_draw: ; Draw routine of a list entry that only restores.
+	rts
+
+; The text cells a sprite's 16 pixels touch, for each X or Y (sprite
+; coordinates: 16 is the display's left or top edge).
+
+build_cell_span:
+	movem.l	d0-d4/a0,-(sp)
+
+	lea		cell_span,a0
+	moveq	#0,d0
+
+.loop:
+	move	d0,d1
+	sub		#16,d1
+	asr		#3,d1 ; First cell.
+	bpl.s	.first_ok
+
+	moveq	#0,d1
+
+.first_ok:
+	move	d0,d2
+	subq	#1,d2
+	asr		#3,d2 ; Last cell.
+
+	moveq	#0,d3
+	tst		d2
+	bmi.s	.store
+
+	cmp		#31,d1
+	bgt.s	.store
+
+	cmp		#31,d2
+	ble.s	.last_ok
+
+	moveq	#31,d2
+
+.last_ok:
+	moveq	#-1,d3
+	lsr.l	d1,d3
+	moveq	#-1,d4
+	addq	#1,d2
+	lsr.l	d2,d4
+	not.l	d4
+	and.l	d4,d3
+
+.store:
+	move.l	d3,(a0)+
+
+	addq	#1,d0
+	cmp		#512,d0
+	bne.s	.loop
+
+	movem.l	(sp)+,d0-d4/a0
+
+	rts
 	
 ; ------------------------------------------------------------------------------
 
 draw_text:
 	movem.l	d0-a6,-(sp)
 
-	move.l	work_text_infos_address,a0
+	lea		text_infos,a0
 	lea		translated_palettes+4,a5
 
 .loop:
@@ -1771,9 +2037,9 @@ flip_screen:
 	move	display_background_position,work_background_position
 	move	d0,display_background_position
 
-	move.l	work_text_infos_address,d0
-	move.l	display_text_infos_address,work_text_infos_address
-	move.l	d0,display_text_infos_address
+	move.l	work_text_state_address,d0
+	move.l	display_text_state_address,work_text_state_address
+	move.l	d0,display_text_state_address
 
 ;	move.l	work_sprite_infos_address_old,d0 ; Fixme!
 ;	move.l	display_sprite_infos_address_old,work_sprite_infos_address_old
@@ -1791,6 +2057,7 @@ flip_screen:
 	lsr.l	#6,d0
 	add.l	d0,d1
 	move.l	d1,display_window_address
+	st		flip_pending ; After the address: the VBL handler clears it.
 
 	movem.l	(sp)+,d0-d1
 
@@ -1864,6 +2131,48 @@ graphics_engine:
 	move.l	next_graphics_routine,-(sp)
 	rts
 
+; From the game's VSYNC wait (sz2.s XSP_VSYNC): go on with the picture while
+; the game has nothing else to do, if one is in progress or the game has a new
+; sprite list. The VBL handler leaves the renderer and the host port alone
+; meanwhile (renderer_lock). Past the throttle line the stages get one stage
+; of budget, which lasts until the VBL restarts the throttle: from then on
+; they stop at the throttle line as they would in the VBL handler, while the
+; game waits for that anyway.
+
+render_idle:
+	move.l	d0,-(sp)
+
+	tst.b	runs_wait_vbl ; The restore runs wait for the next frame.
+	bne.s	.done
+
+	cmp.l	#process_sprite_infos,next_graphics_routine
+	bne.s	.work ; A picture in progress.
+
+	tst.b	flip_pending ; The work screen is still the one on display
+	bne.s	.done ; until the VBL handler has set the new address.
+
+	move	game_list_serial,d0
+	cmp		drawn_list_serial,d0
+	beq.s	.done ; Nothing new from the game.
+
+.work:
+	st		renderer_lock
+
+	tst		raster_stages_left
+	bgt.s	.budget
+
+	move	#1,raster_stages_left
+
+.budget:
+	jsr		graphics_engine
+
+	sf		renderer_lock
+
+.done:
+	move.l	(sp)+,d0
+
+	rts
+
 ; ------------------------------------------------------------------------------
 ;
 ; Called by the VBL handler. The graphics stages yield once the display has
@@ -1882,8 +2191,8 @@ graphics_engine:
 restart_raster_throttle:
 	movem.l	d0-d1,-(sp)
 
-	move	raster_stages,d0
-	sub		raster_stages_left,d0 ; Timer B interrupts in the last frame.
+	move	raster_interrupts,d0 ; Timer B interrupts in the last frame.
+	clr		raster_interrupts
 	mulu	#SPRITE_THROTTLE_DISPLAY_LINES,d0
 	add		#SPRITE_THROTTLE_DISPLAY_LINES,d0
 	moveq	#0,d1
@@ -1897,13 +2206,16 @@ restart_raster_throttle:
 	bcs		.restart ; In between (a late VBL): keep the current setting.
 
 	move	#2,raster_stages
+	move	d0,frame_events
 
 	bra		.restart
 
 .single_events:
 	move	#1,raster_stages
+	move	d0,frame_events
 
 .restart:
+	sf		runs_wait_vbl ; The deferred restore runs may go now.
 	move	raster_stages,raster_stages_left
 
 	clr.b	$fffffa1b.w
@@ -2053,13 +2365,16 @@ work_sprite_infos_address:
 	dc.l	emulated_sprite_infos2
 
 next_text_infos_address:
-	dc.l	text_infos1
+	dc.l	text_infos
 
-work_text_infos_address:
-	dc.l	text_infos1
+work_text_state_address:
+	dc.l	text_state1
 	
-display_text_infos_address:
-	dc.l	text_infos2
+display_text_state_address:
+	dc.l	text_state2
+
+text_no_restore: ; Restore data of a list entry that only draws.
+	dc		-1
 
 raster_stages: ; Timer B interrupts until the throttle line: 1, or 2 if doubled.
 	dc		1
@@ -2092,6 +2407,40 @@ work_background_position:
 raster_stages_left: ; Counted down by the Timer B interrupt.
 	ds		1
 
+raster_interrupts: ; Timer B interrupts since the VBL (render_idle changes raster_stages_left).
+	ds		1
+
+frame_events: ; Timer B events in a frame, as last measured.
+	ds		1
+
+game_list_serial: ; Sprite lists the game has finished (prepare_sprite_infos).
+	ds		1
+
+drawn_list_serial: ; The one the current or last picture draws.
+	ds		1
+
+drawn_list_vbl: ; vbl_wait_counter when that picture began.
+	ds		1
+
+renderer_lock: ; The game's VSYNC wait renders (render_idle): not the VBL.
+	ds.b	1
+
+flip_pending: ; flip_screen's address is not in the Videl yet (cleared by the VBL handler).
+	ds.b	1
+
+runs_wait_vbl: ; clear_sprites_dsp put the restore runs off to the next frame.
+	ds.b	1
+
+transfer_masked: ; clear_sprites_dsp raised the interrupt level for the runs.
+	ds.b	1
+
+transfer_sr:
+	ds		1
+
+palette_translated: ; translated_palette_source is valid.
+	ds.b	1
+	even
+
 sprite_infos1: ; screen_address, palette_address, sprite_draw_address, sprite_clear_address.
 	ds.l	512*4+1
 
@@ -2113,14 +2462,31 @@ emulated_sprite_infos2:
 text_bitmaps:
 	ds.l	2*32 ; Text clear bitmap infos followed by text draw bitmap infos.
 
+text_cover: ; Behind text_bitmaps: per text line, the cells this picture's sprites touch.
+	ds.l	32
+
 text_matrix:
 	ds.b	32*32
 
-text_infos1:
+text_infos: ; This picture's text work (prepare_text).
 	ds.l	32*32*4+1 ; screen_adress, background_address, text_draw_address, text_clear_address
 
-text_infos2:
-	ds.l	32*32*4+1 ; screen_adress, background_address, text_draw_address, text_clear_address
+; What each screen shows of the text layer: the character of each cell (0:
+; none), then for each text line the cells with a character and the cells the
+; sprites of the screen's last picture touch (bit 31 = the left cell).
+
+TEXT_STATE_LINES=32*32
+
+text_state1:
+	ds.b	32*32
+	ds.l	32*2
+
+text_state2:
+	ds.b	32*32
+	ds.l	32*2
+
+cell_span: ; For a sprite's X or Y: the text cells its 16 pixels touch (bit 31 = cell 0).
+	ds.l	512
 
 text_reorder_buffer:
 	ds.b	32*4
@@ -2130,6 +2496,9 @@ background_image:
 
 color_translation_table:
 	ds		$10000
+
+translated_palette_source: ; The game's palette as translate_palettes last saw it.
+	ds		16*16
 
 translated_palettes:
 	ds.l	16*16

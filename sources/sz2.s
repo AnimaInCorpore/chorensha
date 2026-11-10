@@ -361,7 +361,12 @@ XSP_VSYNC:
 
 L_0002020A:
 	ifd __ATARI__
-	jsr		music_idle ; MCDRV's ticks while the game waits (atari/music.s).
+	cmp.w   VBL_VWAIT_COUNTER(pc),D0 ; Only while the game has to wait:
+	bls.s	.waited
+	jsr		render_idle ; the picture (atari/graphics.s),
+	jsr		music_idle ; then MCDRV's ticks (atari/music.s).
+	bra.s	L_0002020A
+.waited:
 	endif
 	cmp.w   VBL_VWAIT_COUNTER(pc),D0                    ; 0002020A B07A 1FDE
 	bhi.s   L_0002020A                              ; 0002020E 62FA
@@ -5759,8 +5764,11 @@ WAIT_VBL:
 
 .vbl_wait_loop:
 	cmp		vbl_wait_counter,d1
-	
-	bge		.vbl_wait_loop
+	blt.s	.vbl_waited
+	jsr		render_idle ; As in XSP_VSYNC: the picture and MCDRV's ticks
+	jsr		music_idle ; while the game waits (both keep all registers).
+	bra.s	.vbl_wait_loop
+.vbl_waited:
 
 	bra		skip_raster_sync2
 

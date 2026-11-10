@@ -22,7 +22,7 @@ A beta.  The game runs, but it has not been played through, and the changes made
 monitor (50 Hz) and on a VGA monitor (60 Hz).
 
 In the attract mode in Hatari the game logic runs every VBL.  Over the first 40 s of the stage 1 demo on RGB, the
-picture keeps up with about 77% of the frames (about 39 pictures a second); before the music it was 86% (about 43).
+picture keeps up with about 82% of the frames (about 41 pictures a second); before the music it was 86% (about 43).
 VGA has not been measured since the music.  These are Hatari figures, not measurements on real hardware.
 
 Known limitations:
@@ -107,7 +107,8 @@ F030Arcade's notes on its pinned Hatari build).
   CRTC, palette and sprite registers are ordinary RAM.
 - **The renderer** (`sources/atari/graphics.s`): a double-buffered 256 x 240 true-colour screen.  All 1,885 sprite
   patterns are compiled at load time into 68030 code, in four flips each; a sprite draws itself with its colours in
-  registers.  The text layer uses compiled characters as well.
+  registers.  The text layer uses compiled characters as well; a picture restores and draws only the characters that
+  have changed on its screen, and draws again those that sprites touch.
 - **The DSP** (`sources/atari/dsprite.asm`) keeps masks of the sprites of the last two frames.  The pixels that were
   covered before but are not now are sent to the 68030 as runs (offset and jump displacement), and the 68030 copies
   those pixels from the background image with unrolled longword moves.  The 1,885 sprite patterns have 1,372 different
@@ -125,7 +126,10 @@ F030Arcade's notes on its pinned Hatari build).
   rendered in blocks of 48 samples between its sprite work.  The music takes about half of the DSP and, in the
   Musashi emulator, 1-7% of the 68030.
 - **Scheduling:** the renderer runs in the VBL handler as a chain of stages and yields at display line 170 (counted by
-  Timer B, one or two events a line, detected each frame), so that the game gets the rest of the frame.
+  Timer B, one or two events a line, detected each frame), so that the game gets the rest of the frame.  When the
+  game waits for the next VBL, the renderer goes on from there (`render_idle`), and the VBL handler leaves it alone
+  meanwhile.  After a flip it waits for the VBL that shows the new screen, and restore runs that do not fit into the
+  frame wait for the next one.  A picture starts only for a new sprite list from the game (or every 4 VBLs, for the text layer).
 - **The machine** (`machine.s`): the Videl modes and the interrupt vectors; `input.s` the IKBD (keyboard, joystick,
   mouse); `audio.s` the sample buffer and the conversion of the effects.  `sources/atari/adpcm.s` is a separate tool
   that turned the X68000's ADPCM sound effects into the samples in `PCM_DAT`.

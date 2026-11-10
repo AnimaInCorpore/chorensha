@@ -320,6 +320,13 @@ send_music_packet:
 	moveq	#MUSIC_PACKET,d0
 
 .header:
+	move	sr,-(sp) ; No VBL during the transfer: the DSP renders no music
+	btst	#2,(sp) ; meanwhile (the VBL handler already runs at level 4).
+	bne.s	.masked
+
+	ori		#$0400,sr
+
+.masked:
 	lea		$ffffa204.w,a1
 	move.l	d0,d1
 	or.l	#$800000,d1
@@ -347,6 +354,8 @@ send_music_packet:
 	btst	#1,$ffffa202.w
 	beq.s	.blocks
 	move.l	d2,(a1)
+
+	move	(sp)+,sr
 
 	add.l	d2,music_sent_blocks
 	cmp.l	#music_ring_end,a0
