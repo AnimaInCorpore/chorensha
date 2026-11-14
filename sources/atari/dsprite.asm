@@ -989,12 +989,40 @@ _go:
 	bclr	#0,x:<music_welcome
 	bclr	#m_hf3,x:m_hcr
 
-	move	#>POLL_TRANSFER,x0 ; Top the ring up for the transfer.
-	move	x0,x:<poll_need
-	do		#5,_top_up
-	jsr		music_poll
-	nop ; No JSR at a loop's end.
+	; Top the ring up for the transfer, during which the 68030 waits with
+	; its interrupts masked: only as far as the list needs. A segment lasts
+	; about as long as 560 runs take the 68030, so a short list may start
+	; with more blocks behind (the ring has eight, and POLL_URGENT lets
+	; five go by). A block in work stays as it is and goes on afterwards.
+
+	move	#>4*SEG,x1
+	move	y:rle_length,a ; Two words a run.
+	move	#>2*512,x0
+	cmp		x0,a
+	jlt		_need
+	move	#>3*SEG,x1
+	move	#>2*1024,x0
+	cmp		x0,a
+	jlt		_need
+	move	#>POLL_TRANSFER,x1
+_need:
+	move	x1,x:<poll_need
+
 _top_up:
+	move	r6,a ; How far is the SSI past the next segment's start?
+	move	x:<ring_seg,x0
+	sub		x0,a
+	jge		_ahead
+	move	#>SSI_RING_SIZE,x0
+	add		x0,a
+_ahead:
+	move	x:<poll_need,x0
+	cmp		x0,a
+	jlt		_send
+	jsr		music_step
+	jmp		_top_up
+
+_send:
 	move	#rle_buffer,r4
 	move	y:rle_length,b ; Number of words.
 
