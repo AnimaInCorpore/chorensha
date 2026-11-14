@@ -11,9 +11,17 @@
 ;            while HF3 is set (the DSP waits or draws the old masks, its
 ;            FIFO has room for MUSIC_PACKET words and holds less than
 ;            MUSIC_LEAD blocks); the 68030 polls TXDE for each word
-;   n        n sprites, 3 words each (flip + mask index, X, Y), sent while
-;            HF2 is set; after the header (the 68030 waits for TRDY) the
-;            words come without polling
+;   n        the scrolling offset (24 bits, signed), then n sprites, 3 words
+;            each (flip + mask index, X, Y), sent while HF2 is set; after
+;            the header (the 68030 waits for TRDY) the words come without
+;            polling
+; Scrolling: the 68030's screens hold the whole background, and the display
+; moves over it. The mask of the pixels to restore stays in the lines of the
+; picture that drew its sprites, the screen's last one; the offset is the
+; lines the display has moved down the screen since then, and the new sprites
+; are cut out of the mask that much lower. The runs cover all the mask's
+; lines, not only the 240 on display: a sprite left above or below them
+; would scroll into the picture later.
 ; The 68030 draws the new sprites before it gets the restore runs, so the runs
 ; must not touch a pixel a new sprite covers: the masks are per pixel (pairs
 ; of pixels would restore half-covered pairs over finished sprites).
@@ -41,6 +49,9 @@ RLE_GAP_SPLIT equ RLE_MAX_OFFSET+1-RLE_LINE_BYTES ; A gap this long is sent befo
 RLE_CHUNK_SHIFT equ $000020 ; MPY by this: a1 = the top 6 bits, a0 = the rest shifted up.
 RLE_ROOM equ 1200 ; Four lines add at most 4*291 values, and the scan frees 48 words.
 MAX_SPRITES equ 512
+MASK_LINE equ (16+256+16)/8/3 ; Words of a mask line.
+MASK_LINES equ 16+256+16
+SCROLL_GUARD equ 15 ; Lines above the mask a scrolled sprite may start at.
 
 ; Sound: the SSI sends the ring to the DAC and receives the sound effects
 ; (DMA playback, 16-bit stereo) at 25.175 MHz / 256 / 4 = 24585 Hz. The
@@ -78,7 +89,7 @@ FBB equ $4090 ; Older history, onward gain, history gain (modulo 3).
 sprite_mask equ $40a0 ; 16 words.
 sprite_convert_shifts equ $40b0 ; 2 words.
 rle_length equ $40b2
-scrolling_offset equ $40b3
+scrolling_offset equ $40b3 ; The packet's offset + SCROLL_GUARD.
 ssi_status equ $40b4
 rle_lines equ $40b5 ; Lines of the mask not scanned yet.
 rle_reader equ $40b6 ; The scan's place in the mask.
@@ -190,6 +201,12 @@ _sprites:
 	bclr	#0,x:<music_welcome
 	bclr	#m_hf3,x:m_hcr
 
+	jclr	#0,x:m_hsr,*
+	movep	x:m_hrx,b ; Scrolling offset.
+	move	#>SCROLL_GUARD,x1
+	add		x1,b
+	move	b1,y:scrolling_offset
+
 	move	x:<work_sprite_infos,r0
 	move	#>$ffff,x1
 	move	#>$fff,y1
@@ -247,8 +264,12 @@ _no_poll:
 	jsr		prepare_mask
 	jsr		sprite_position
 
+	; The sprite's line in the mask, counted from SCROLL_GUARD lines above
+	; it: a sprite that starts above the mask is drawn from there, into the
+	; end of rle_buffer, which holds nothing now.
+
 	move	y:scrolling_offset,y1
-	add		y1,b #>16+256,y1
+	add		y1,b #>SCROLL_GUARD+16+256,y1
 	jmi		<_skip_drawing
 
 	cmp		y1,b b1,y0
@@ -258,7 +279,7 @@ _no_poll:
 	move	#>(16+256+16)/8/3/2,y1
 	mac		y0,y1,b a1,n1
 	move	#sprite_mask,r4
-	move	#screen_buffer,r5
+	move	#screen_buffer-SCROLL_GUARD*MASK_LINE,r5
 	move	b0,n5
 	move	#<shift_values,r1
 	move	n1,n2
@@ -908,9 +929,9 @@ ssi_tx_exception:
 ; Start the scan of a picture's mask.
 
 rle_start:
-	move	#screen_buffer+(16+256+16)/8/3*16,r4
+	move	#screen_buffer,r4
 	move	r4,y:rle_reader
-	move	#>240,x0
+	move	#>MASK_LINES,x0
 	move	x0,y:rle_lines
 
 	rts

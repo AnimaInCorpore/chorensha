@@ -29,7 +29,8 @@ Known limitations:
 
 - The music and the sound effects play through the DSP (see below).  This is newer than release 0.1 and has only been
   checked in Hatari.
-- The background does not scroll (`update_background` in `sources/atari/graphics.s`).
+- The background scrolls as one layer, with the X68000's slow graphic layer (one line a frame); the fast layer and the
+  sideways scrolling are not there.  The scrolling is newer than release 0.1 and has only been checked in Hatari.
 - The bottom 16 lines of the X68000's 256-line picture are not shown.
 
 The same source still builds the original X68000 program: the build compares the result with the original `SZ2.X`
@@ -108,7 +109,9 @@ F030Arcade's notes on its pinned Hatari build).
 - **The renderer** (`sources/atari/graphics.s`): a double-buffered 256 x 240 true-colour screen.  All 1,885 sprite
   patterns are compiled at load time into 68030 code, in four flips each; a sprite draws itself with its colours in
   registers.  The text layer uses compiled characters as well; a picture restores and draws only the characters that
-  have changed on its screen, and draws again those that sprites touch.
+  have changed on its screen, and draws again those that sprites touch.  Each screen holds the whole background
+  (512 lines and the first 256 again), and the display scrolls by moving over it; the text, which does not scroll, is
+  then restored and drawn again in every picture.
 - **The DSP** (`sources/atari/dsprite.asm`) keeps masks of the sprites of the last two frames.  The pixels that were
   covered before but are not now are sent to the 68030 as runs (offset and jump displacement), and the 68030 copies
   those pixels from the background image with unrolled longword moves.  The 1,885 sprite patterns have 1,372 different

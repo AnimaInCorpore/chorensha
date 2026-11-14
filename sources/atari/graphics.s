@@ -1276,6 +1276,7 @@ prepare_sprite_infos:
 	move.l	work_sprite_infos_address,d0
 	move.l	display_sprite_infos_address,work_sprite_infos_address
 	move.l	d0,display_sprite_infos_address
+	move	L_00E80000+$22,game_list_scroll ; The CRTC's Y scroll of the slow graphic layer.
 	addq	#1,game_list_serial ; A new list for render_idle.
 	
 	movem.l	(sp)+,d0-a6
@@ -1320,19 +1321,42 @@ process_sprite_infos:
 	move	game_list_serial,drawn_list_serial
 	move	renderer_vbls,drawn_list_vbl
 
-	move.l	#background_image+16*256*2*2,restore_background_address
-	move.l	work_screen_address,d0
-	add.l	#16*256*2*2,d0
-	move.l	d0,restore_screen_address
+	; Scrolling. Each screen holds the whole background (512 lines and
+	; the first 256 again), and the display moves over it: the picture's
+	; position is the background line at the sprites' line 0. The work
+	; screen still has its last picture, at that picture's position: the
+	; restore runs and the old text are taken away there, and the DSP gets
+	; the lines the display has moved since (see dsprite.asm).
+
+	move	game_list_scroll,d0 ; The X68000 shows line (y + scroll) & 511.
+	and		#$1ff,d0
+	move	work_background_position,d1 ; Of the work screen's last picture.
+	move	d0,work_background_position
+
+	move	d0,d2
+	sub		d1,d2
+	move	d2,dsp_scroll_offset
+
+	swap	d0
+	clr		d0
+	lsr.l	#6,d0 ; * 256*2*2
+	swap	d1
+	clr		d1
+	lsr.l	#6,d1
+
+	move.l	d1,d2
+	sub.l	d0,d2
+	move.l	d2,text_move ; From a cell's address to where it was drawn.
+
+	move.l	work_screen_address,a2
+	lea		(a2,d1.l),a5
+	move.l	a5,restore_screen_address
+	add.l	#background_image,d1
+	move.l	d1,restore_background_address
 	sf		restore_more
 
 	move.l	SPRITE_DATA_ADDRESS,a1
 
-	move.l	work_screen_address,a2
-	move	work_background_position,d0
-	swap	d0
-	clr		d0
-	lsr.l	#6,d0
 	add.l	d0,a2
 
 	lea		translated_palettes,a3
@@ -1376,6 +1400,10 @@ process_sprite_infos:
 
 	btst	#2,$ffffa202.w ; TRDY: it has taken the count; the rest goes unpolled.
 	beq		*-6
+
+	move	dsp_scroll_offset,d0
+	ext.l	d0
+	move.l	d0,$ffffa204.w ; Scrolling offset -> DSP (24 bits, signed).
 
 	subq	#1,d7
 
@@ -1431,7 +1459,7 @@ process_sprite_infos:
 
 	movem.l	(sp)+,d0-a6
 
-	bra		update_background
+	bra		translate_palettes
 
 .not_now:
 	movem.l	(sp)+,d0-a6
@@ -1455,22 +1483,6 @@ process_sprite_infos:
 	bne.s	.cover_line
 
 	bra.s	.covered
-
-; ------------------------------------------------------------------------------
-
-update_background:
-	movem.l	d0-d1,-(sp)
-
-	move	#512-1,d0
-	move	BACKGROUND_SCROLL_COUNTER,d1
-	and		#$1ff,d1
-	sub		d1,d0
-	clr		d0 ; Fixme!
-	move	d0,work_background_position
-
-	movem.l	(sp)+,d0-d1
-
-	bra		translate_palettes
 
 ; ------------------------------------------------------------------------------
 
@@ -1821,9 +1833,12 @@ prepare_text:
 	; restore runs take away together with the character's pixels on them.
 	; All other text stays as it is on the screen.
 	;
-	; The text cells do not follow the background position (which is
-	; always 0, see update_background); process_sprite_infos marks the
-	; cells by the sprites' coordinates.
+	; The text does not scroll, so when the display has moved over the
+	; screen since its last picture (text_move), every character shown is
+	; restored where it was drawn and every character wanted is drawn at
+	; its new place, as two list entries.
+	;
+	; process_sprite_infos marks the cells by the sprites' coordinates.
 
 	lea		text_bitmaps+32*4,a0 ; The cells with a character, per line.
 	lea		text_matrix,a1
@@ -1835,6 +1850,11 @@ prepare_text:
 	move.l	#background_image,d7
 	sub.l	a5,d7 ; From a screen address to the background's.
 	add.l	#SCREEN_DISPLAY_OFFSET,a5
+	moveq	#0,d0
+	move	work_background_position,d0
+	lsl.l	#8,d0
+	lsl.l	#2,d0
+	add.l	d0,a5
 
 .line:
 	move.l	(a0),d2 ; Wanted.
@@ -1852,32 +1872,63 @@ prepare_text:
 
 .cell:
 	btst	d6,d0
-	beq.s	.next_cell
+	beq	.next_cell
 
 	moveq	#0,d4
 	move.b	(a3),d4 ; Shown (0: none).
 	moveq	#0,d5
 	btst	d6,d2
-	beq.s	.compare
+	beq	.compare
 
 	move.b	(a1),d5 ; Wanted.
 
 .compare:
+	tst.l	text_move
+	bne	.moved
+
 	cmp.b	d4,d5
-	bne.s	.changed
+	bne	.changed
 
 	btst	d6,d1
-	beq.s	.next_cell
+	beq	.next_cell
 
 	lsl		#5,d5
-	beq.s	.next_cell
+	beq	.next_cell
 
 	move.l	a5,(a4)+ ; Draw it again.
 	clr.l	(a4)+
 	move.l	(a2,d5.w),(a4)+
 	move.l	#text_no_restore,(a4)+
 
-	bra.s	.next_cell
+	bra	.next_cell
+
+.moved:
+	move.b	d5,(a3)
+	bclr	d6,d3
+
+	lsl		#5,d4
+	beq.s	.moved_draw
+
+	move.l	a5,d1 ; The touched cells are not needed here.
+	add.l	text_move,d1
+	move.l	d1,(a4)+ ; Restore it where it was.
+	add.l	d7,d1
+	move.l	d1,(a4)+
+	move.l	#text_no_draw,(a4)+
+	move.l	4(a2,d4.w),(a4)+
+
+.moved_draw:
+	lsl		#5,d5
+	beq		.next_cell
+
+	bset	d6,d3
+
+	move.l	a5,(a4)+ ; Draw it here.
+	clr.l	(a4)+
+	move.l	(a2,d5.w),(a4)+
+	move.l	#text_no_restore,(a4)+
+
+	bra		.next_cell
 
 .changed:
 	move.b	d5,(a3)
@@ -2415,11 +2466,20 @@ work_screen_address:
 display_window_address:
 	ds.l	1
 
-display_background_position:
-	ds		1
+display_background_position: ; The background line at the sprites' line 0, for each
+	ds		1 ; screen's last picture.
 
 work_background_position:
 	ds		1
+
+game_list_scroll: ; The CRTC's scroll register when the game finished its sprite list.
+	ds		1
+
+dsp_scroll_offset: ; Lines the display has moved since the work screen's last picture.
+	ds		1
+
+text_move: ; The same in bytes, negated: from a text cell to where it was drawn.
+	ds.l	1
 
 raster_stages_left: ; Counted down by the Timer B interrupt.
 	ds		1
@@ -2497,8 +2557,8 @@ text_cover: ; Behind text_bitmaps: per text line, the cells this picture's sprit
 text_matrix:
 	ds.b	32*32
 
-text_infos: ; This picture's text work (prepare_text).
-	ds.l	32*32*4+1 ; screen_adress, background_address, text_draw_address, text_clear_address
+text_infos: ; This picture's text work (prepare_text): up to two entries a cell.
+	ds.l	32*32*4*2+1 ; screen_adress, background_address, text_draw_address, text_clear_address
 
 ; What each screen shows of the text layer: the character of each cell (0:
 ; none), then for each text line the cells with a character and the cells the
