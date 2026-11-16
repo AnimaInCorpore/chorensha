@@ -1378,8 +1378,64 @@ process_sprite_infos:
 .no_text:
 	dbf		d4,.text_lines
 
+	tst.l	d6
+	beq.s	.covered
+
+	move.l	a0,a5
+	move	d7,d5
+	subq	#1,d5
+
+.cover_sprite:
+	move	(a5),d0 ; X.
+	move	2(a5),d1 ; Y.
+	addq.l	#8,a5
+
+	and		#$1ff,d1
+	move.l	(cell_span.l,d1.w*4),d4
+	and.l	d6,d4 ; Text lines the sprite touches.
+	beq.s	.next_cover
+
+	and		#$1ff,d0
+	move.l	(cell_span.l,d0.w*4),d1 ; Its cells in a line.
+	beq.s	.next_cover
+
+.cover_line:
+	bfffo	d4{0:32},d2
+	moveq	#31,d3
+	sub		d2,d3
+	bclr	d3,d4
+	or.l	d1,(text_cover.l,d2.w*4)
+
+	tst.l	d4
+	bne.s	.cover_line
+
+.next_cover:
+	dbf		d5,.cover_sprite
+
+.covered:
+	; The DSP may still be drawing the masks of the last list (draw_masks
+	; in dsprite.asm) before it takes the next one. The palettes and the
+	; text lists need no DSP: the 68030 does them meanwhile, and the rest
+	; after the list once the DSP is ready (d5: bit 0 palettes, bit 1 text).
+
+	moveq	#0,d5
+
 	btst	#3,$ffffa202.w ; HF2: the DSP waits for a packet.
+	bne.s	.dsp_ready
+
+	jsr		translate_palettes
+	bset	#0,d5
+
+	btst	#3,$ffffa202.w
+	bne.s	.dsp_ready
+
+	jsr		prepare_text
+	bset	#1,d5
+
+	btst	#3,$ffffa202.w
 	beq		*-6
+
+.dsp_ready:
 
 	jsr		send_music_packet ; Masks the VBL for its own packets.
 
@@ -1445,8 +1501,6 @@ process_sprite_infos:
 .loop:
 	movem	(a0)+,d0-d3
 
-	move	d1,d5
-
 	lea		(a2,d0.w*2),a5
 	swap	d1
 	clr		d1
@@ -1494,13 +1548,6 @@ process_sprite_infos:
 	move.l	d2,a6
 	move.l	16(a5),(a4)+ ; Sprite restore address.
 
-	move	d5,d4
-	and		#$1ff,d4
-	move.l	(cell_span.l,d4.w*4),d4
-	and.l	d6,d4 ; Text lines the sprite touches.
-	bne.s	.cover
-
-.covered:
 	dbf		d7,.loop
 
 	; draw_sprites draws a group of sprites between its checks: fill the
@@ -1524,32 +1571,26 @@ process_sprite_infos:
 
 	clr.l	(a4) ; End marker.
 
+	btst	#0,d5
+	bne.s	.palettes_done
+
+	jsr		translate_palettes
+
+.palettes_done:
+	btst	#1,d5
+	bne.s	.text_done
+
+	jsr		prepare_text
+
+.text_done:
 	movem.l	(sp)+,d0-a6
 
-	bra		translate_palettes
+	bra		clear_text
 
 .not_now:
 	movem.l	(sp)+,d0-a6
 
 	rts
-
-.cover:
-	move	d0,d1
-	and		#$1ff,d1
-	move.l	(cell_span.l,d1.w*4),d1 ; Its cells in a line.
-	beq.s	.covered
-
-.cover_line:
-	bfffo	d4{0:32},d2
-	moveq	#31,d3
-	sub		d2,d3
-	bclr	d3,d4
-	or.l	d1,(text_cover.l,d2.w*4)
-
-	tst.l	d4
-	bne.s	.cover_line
-
-	bra.s	.covered
 
 ; ------------------------------------------------------------------------------
 
@@ -1628,7 +1669,7 @@ translate_palettes:
 .unchanged:
 	movem.l	(sp)+,d0-a6
 
-	bra		prepare_text
+	rts
 
 ; ------------------------------------------------------------------------------
 
@@ -2082,7 +2123,7 @@ prepare_text:
 
 	movem.l	(sp)+,d0-a6
 
-	bra		clear_text
+	rts
 
 text_no_draw: ; Draw routine of a list entry that only restores.
 no_sprite: ; Draw routine of an entry that fills draw_sprites' last group.
