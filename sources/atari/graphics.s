@@ -238,117 +238,129 @@ release_graphics:
 
 ; ------------------------------------------------------------------------------
 ;
-; a0.l = compiled sprites struct address.
+; a0.l = compiled sprites struct address (the field of the drawing entry).
 ;
-
-; d0   #1
-; d1   #2
-; d2   #3
-; d3   #4
-; d4   #5
-; d5   #6
-; d6   #7
-; d7   #8 
-; a0   #9
-; a1   #10
-; a2   #11
-; a3   #12
-; a4   #13
-; a5   palette_address / #14
-; a6   screen_address
-; sp   stack_pointer
-; (sp) #15
+; Registers of the drawing code. Each colour has a register of its own for all
+; sprites, so that sprites of the same palette can follow one another without
+; loading it again (the palette chain, as in F030Arcade's CPS1 tile compiler):
+;
+; d0       colours 1 (low word) and 2 (high word): "swap d0" for colour 2,
+;          and swapped back at the end. Colours 1 and 2 are the rarest.
+; d1-d7    colours 3-9
+; a0-a5    colours 10-15
+; a6       the sprite's list entry on entry, then its screen address
+;
+; A palette (translated_palettes) holds each colour twice in a long; its
+; colour 2 holds colour 1 in its low word. A list entry's palette address
+; points at colour 2, so "movem.l (a5),d0-d7/a0-a5" loads them all.
+;
+; The code has three entries:
+;
+; partial  loads the colours the sprite uses (struct field + 64).
+; full     loads all colours (drawing entry - 8): for a sprite that the next
+;          one of the same palette follows.
+; drawing  loads none (struct field): the previous sprite had the same palette.
+;
+; A transparent gap followed by a single pixel is drawn with a displacement,
+; "move.w rx,d16(a6)", without moving a6.
 
 convert_sprite_to_drawing_code:
 	movem.l	d0-a6,-(sp)
 
-	lea		sprite_matrix,a1
 	move.l	free_compiled_objects_address,a2
-	move.l	a2,(a0)
-	lea		sprite_color_to_register_table,a0
 
-	; Colors.
+	tst.b	compiling_characters ; Characters have no palette of their own.
+	bne		.drawing_entry
 
-	lea		sprite_colors_count+2,a3 ; Start at index #1.
-	clr		d0 ; Color index.
-	clr		d1 ; Color register bitmap (for "movem.l", bit 0 = d0, ...).
-	clr		d2 ; Gap offset.
+	; The registers of the colours the sprite uses: lowest in d2, highest in d3.
 
-	cmp		#15,sprite_color_count
-	bne		.skip_color_fix1
-
-	move	#$2f2d,(a2)+ ; "move.l x(a5),-(sp)".
-	move	#15*4,(a2)+ ; "x".
-
-.skip_color_fix1:
-	move	#16-1-1,d7
+	lea		sprite_colors_count+2,a3 ; Colour 1.
+	moveq	#14,d2
+	moveq	#-1,d3
+	moveq	#1,d0 ; Colour.
 
 .colors_loop:
 	tst		(a3)+
-	beq		.process_gap
+	beq.s	.color_not_used
+
+	move	d0,d1
+	subq	#2,d1 ; Colour 3 and up: d1, ...
+	bpl.s	.register
+
+	moveq	#0,d1 ; Colours 1 and 2: d0.
+
+.register:
+	cmp		d1,d2
+	ble.s	.not_lowest
+
+	move	d1,d2
+
+.not_lowest:
+	cmp		d1,d3
+	bge.s	.color_not_used
+
+	move	d1,d3
+
+.color_not_used:
+	addq	#1,d0
+	cmp		#16,d0
+	bne.s	.colors_loop
+
+	; Partial entry.
+
+	move.l	a2,64(a0)
+
+	tst		d3
+	bmi.s	.no_colors
+
+	move.l	#$2a6e0004,(a2)+ ; "move.l 4(a6),a5".
+
+	moveq	#-1,d1 ; Registers d2 to d3 (bit 0 = d0).
+	addq	#1,d3
+	lsl.l	d3,d1
+	not.l	d1
+	moveq	#-1,d0
+	lsl.l	d2,d0
+	and		d0,d1
 
 	tst		d2
-	beq		.count_colors
+	bne.s	.displaced_movem
 
-	cmp		#8,d2
-	ble		.quick_add1
+	move	#$4cd5,(a2)+ ; "movem.l (a5),rx-ry".
+	move	d1,(a2)+
 
-	move	#$4bed,(a2)+ ; "lea x(a5),a5".
+	bra.s	.no_colors
+
+.displaced_movem:
+	move	#$4ced,(a2)+ ; "movem.l x(a5),rx-ry".
+	move	d1,(a2)+
+	lsl		#2,d2
 	move	d2,(a2)+ ; "x".
 
-	bra		.count_colors
+.no_colors:
+	move	#$6008,(a2)+ ; "bra.s" to the drawing entry, over the full one.
 
-.quick_add1:
-	and		#$7,d2
-	lsl		#8,d2
-	add		d2,d2
-	add		#$508d,d2 ; "addq.l #x,a5".
-	move	d2,(a2)+
+	; Full entry.
 
-.count_colors:
-	clr		d2
+	move.l	#$2a6e0004,(a2)+ ; "move.l 4(a6),a5".
+	move.l	#$4cd53fff,(a2)+ ; "movem.l (a5),d0-d7/a0-a5".
 
-	move	2(a0,d0.w*2),d3
-	cmp		#15,d3
-	beq		.skip_color_fix2
+.drawing_entry:
+	move.l	a2,(a0)
 
-	bset	d3,d1
+	move	#$2c56,(a2)+ ; "move.l (a6),a6".
 
-.skip_color_fix2:
-	bra		.next_color
-
-.process_gap:
-	tst		d1
-	beq		.count_gaps
-
-	move	#$4cdd,(a2)+ ; "movem.l (a5)+,rx-ry".
-	move	d1,(a2)+ ; "rx-ry".
-
-.count_gaps:
-	clr		d1
-
-	addq	#4,d2
-
-.next_color:
-	addq	#1,d0
-
-	dbf		d7,.colors_loop
-
-	tst		d1
-	beq		.no_final_colors
-
-	move	#$4cdd,(a2)+ ; "movem.l (a5)+,rx-ry".
-	move	d1,(a2)+ ; "rx-ry".
-
-.no_final_colors:
 	; Pixels.
+
+	lea		sprite_matrix,a1
 
 	clr		d0 ; Gap offset.
 	clr		d1
+	clr		d4 ; d0 swapped (colour 2 in its low word).
 
 	move	#16-1,d7
 
-.lines_loop2:
+.lines_loop:
 	move	#16-1,d6
 
 .pixels_loop:
@@ -360,42 +372,68 @@ convert_sprite_to_drawing_code:
 	bra		.next_pixel
 
 .process_pixel:
+	move	d1,d3
+	subq	#2,d3 ; Register.
+	bgt.s	.no_swap
+
+	; Colour 1 or 2: d0, with the colour in its low word.
+
+	moveq	#0,d3
+	moveq	#0,d5
+	cmp		#2,d1
+	seq		d5
+	cmp.b	d4,d5
+	beq.s	.no_swap
+
+	move	#$4840,(a2)+ ; "swap d0".
+	move.b	d5,d4
+
+.no_swap:
 	tst		d0
 	beq		.draw_pixel
 
+	; After a gap: a single pixel is drawn with a displacement.
+
+	tst		d6
+	beq.s	.displaced_pixel ; The last pixel of the line.
+
+	tst.b	(a1)
+	bne.s	.move_screen_address ; Not a single pixel.
+
+.displaced_pixel:
+	move	d3,d2
+	add		#$3d40,d2 ; "move.w rx,x(a6)".
+	move	d2,(a2)+
+	move	d0,(a2)+ ; "x".
+	addq	#2,d0
+
+	bra.s	.next_pixel
+
+.move_screen_address:
 	cmp		#8,d0
-	ble		.quick_add2
+	ble		.quick_add
 
 	move	#$4dee,(a2)+ ; "lea x(a6),a6".
 	move	d0,(a2)+ ; "x".
 
-	bra		.draw_pixel
+	bra		.draw_pixel_offset_done
 
-.quick_add2:
+.quick_add:
 	and		#$7,d0
 	lsl		#8,d0
 	add		d0,d0
 	add		#$508e,d0 ; "addq.l #x,a6".
 	move	d0,(a2)+
 
-.draw_pixel:
+.draw_pixel_offset_done:
 	clr		d0
 
-	move	(a0,d1.w*2),d2 ; "x".
-	cmp		#15,d2
-	bne		.skip_color_fix3
-
-	move	#$3cd7,d2 ; "move.w (sp),(a6)+".
-	cmp		-2(a2),d2 ; Is the last opcode also "move.w (sp),(a6)+"?
-	bne		.set_draw_color_command
-
-	move	#$2cd7,d2 ; "move.l (sp),(a6)+".
-	subq.l	#2,a2
-
-	bra		.set_draw_color_command
-
-.skip_color_fix3:
+.draw_pixel:
+	move	d3,d2
 	add		#$3cc0,d2 ; "move.w rx,(a6)+".
+
+	tst		d3
+	beq.s	.set_draw_color_command ; d0 holds two colours.
 
 	cmp		-2(a2),d2 ; Is the last opcode also "move.w rx,(a6)+"?
 	bne		.set_draw_color_command
@@ -411,14 +449,14 @@ convert_sprite_to_drawing_code:
 
 	add		#(256*2-16)*2,d0
 
-	dbf		d7,.lines_loop2
+	dbf		d7,.lines_loop
 
-	cmp		#15,sprite_color_count
-	bne		.skip_color_fix4
+	tst.b	d4
+	beq.s	.not_swapped
 
-	move	#$588f,(a2)+ ; "addq.l #4,sp".
+	move	#$4840,(a2)+ ; "swap d0": colour 1 in d0's low word again.
 
-.skip_color_fix4:
+.not_swapped:
 	move	#$4e75,(a2)+ ; "rts".
 
 	move.l	a2,free_compiled_objects_address
@@ -727,28 +765,6 @@ compile_sprite:
 	; Sprite mask for the DSP.
 
 	jsr		build_sprite_mask
-
-	; Palette color counting.
-
-	lea		sprite_colors_count+2,a0
-	lea		sprite_color_to_register_table+2,a1
-	clr		d0
-
-	move	#16-1-1,d7
-
-.count_loop:
-	tst		(a0)+
-	beq		.color_not_used
-
-	move	d0,(a1)
-	addq	#1,d0
-
-.color_not_used:
-	addq.l	#2,a1
-
-	dbf		d7,.count_loop
-
-	move	d0,sprite_color_count
 
 	; Create normal sprite.
 
@@ -1078,8 +1094,10 @@ compile_characters:
 	cmp		#TOTAL_NUMBER_OF_CHARACTERS,d0
 	bne		.reorder_loop
 	
-	; Compile characters.
+	; Compile characters: their code has only the drawing entry, as all
+	; of them use the text palette, which draw_text loads.
 
+	st		compiling_characters
 	move.l	TEXT_GRAPHICS_ADDRESS,-(sp)
 	
 	move	#TOTAL_NUMBER_OF_CHARACTERS-1,d7
@@ -1147,28 +1165,6 @@ compile_characters:
 
 	dbf		d6,.lines_loop
 
-	; Palette color counting.
-
-	lea		sprite_colors_count+2,a0
-	lea		sprite_color_to_register_table+2,a1
-	clr		d0
-
-	moveq	#16-1-1,d6
-
-.count_loop:
-	tst		(a0)+
-	beq		.color_not_used
-
-	move	d0,(a1)
-	addq	#1,d0
-
-.color_not_used:
-	addq.l	#2,a1
-
-	dbf		d6,.count_loop
-
-	move	d0,sprite_color_count
-
 	; Create normal sprite.
 
 	move.l	(sp),a0
@@ -1177,9 +1173,10 @@ compile_characters:
 	jsr		convert_sprite_to_restore_data
 
 	add.l	#4*8,(sp)
-	
+
 	dbf		d7,.characters_loop
-	
+
+	sf		compiling_characters
 	addq.l	#4,sp
 	movem.l	(sp)+,d0-a6
 
@@ -1438,6 +1435,12 @@ process_sprite_infos:
 	move.l	display_sprite_infos_address,a0
 	addq.l	#2,a0
 
+	; The drawing entry of each sprite (see convert_sprite_to_drawing_code):
+	; one that follows a sprite of the same palette loads no colours, and
+	; that sprite then loads all of them; any other loads its own.
+
+	suba.l	a6,a6 ; The previous sprite's drawing entry (none).
+
 .loop:
 	movem	(a0)+,d0-d3
 
@@ -1453,8 +1456,9 @@ process_sprite_infos:
 	move	d3,d1
 	lsr		#4,d1
 	and		#$f0,d1
-	lea		4(a3,d1.w*4),a5
+	lea		8(a3,d1.w*4),a5 ; Colour 2 (see convert_sprite_to_drawing_code).
 	move.l	a5,(a4)+ ; Palette address.
+	move.l	a5,d1
 
 	ext.l	d2
 	lsl.l	#2+3+2,d2
@@ -1463,7 +1467,30 @@ process_sprite_infos:
 	rol		#2,d3
 	and		#$3,d3
 	lea		(a5,d3.w*4),a5
-	move.l	(a5),(a4)+ ; Sprite draw address.
+	move.l	(a5),d2 ; Its drawing entry.
+
+	move.l	a6,d4
+	beq.s	.own_colours ; The first sprite.
+
+	cmp.l	-24+4(a4),d1 ; a4: this entry + 8.
+	bne.s	.own_colours ; Another palette than the previous sprite's.
+
+	cmp.l	-24+8(a4),d4
+	beq.s	.chained ; The previous sprite follows one of the same palette.
+
+	subq.l	#8,d4 ; It loads all colours.
+	move.l	d4,-24+8(a4)
+
+.chained:
+	move.l	d2,(a4)+ ; Sprite draw address: no colours.
+
+	bra.s	.entry_set
+
+.own_colours:
+	move.l	64(a5),(a4)+ ; Sprite draw address: its colours.
+
+.entry_set:
+	move.l	d2,a6
 	move.l	16(a5),(a4)+ ; Sprite restore address.
 
 	move	d5,d4
@@ -1566,6 +1593,18 @@ translate_palettes:
 
 	dbf		d7,.loop
 
+	; Colour 2 holds colour 1 in its low word: the drawing code has d0
+	; for both (see convert_sprite_to_drawing_code).
+
+	lea		translated_palettes,a2
+	moveq	#16-1,d7
+
+.colour_1:
+	move	4(a2),2*4+2(a2)
+	lea		16*4(a2),a2
+
+	dbf		d7,.colour_1
+
 .unchanged:
 	movem.l	(sp)+,d0-a6
 
@@ -1639,28 +1678,32 @@ clear_text:
 	
 ; ------------------------------------------------------------------------------
 
+; The drawing code gets its list entry in a6, and the loop keeps the colour
+; registers d0-d7/a0-a5 for the next sprite (see convert_sprite_to_drawing_code).
+; A sprite may load no colours, so they are loaded here at the start of each
+; stage.
+
 draw_sprites:
 	movem.l	d0-a6,-(sp)
 
-	move.l	next_sprite_infos_address,a0
+	move.l	next_sprite_infos_address,a6
 
-	bra		.start
+	tst.l	(a6)
+	beq		.end
+
+	move.l	4(a6),a5
+	movem.l	(a5),d0-d7/a0-a5
 
 .loop:
-	move.l	d0,a6
-	move.l	(a0)+,a5
-	move.l	(a0)+,a1
-
-	pea		4(a0)
-
-	jsr		(a1)
-
-	move.l	(sp)+,a0
+	move.l	a6,-(sp)
+	jsr		([8,a6])
+	move.l	(sp)+,a6
+	lea		16(a6),a6
 
 	tst		raster_stages_left
 	bgt		.start
 	
-	move.l	a0,next_sprite_infos_address
+	move.l	a6,next_sprite_infos_address
 	move.l	#draw_sprites,next_graphics_routine
 	
 	movem.l	(sp)+,d0-a6
@@ -1668,8 +1711,10 @@ draw_sprites:
 	rts
 
 .start:
-	move.l	(a0)+,d0
+	tst.l	(a6)
 	bne		.loop
+
+.end:
 
 ;	move.l	work_sprite_infos_address_old,d0 ; Fixme!
 ;	move.l	work_sprite_infos_address_new,work_sprite_infos_address_old
@@ -2074,30 +2119,30 @@ build_cell_span:
 	
 ; ------------------------------------------------------------------------------
 
+; The characters use the text palette (palette 0), loaded once a stage.
+
 draw_text:
 	movem.l	d0-a6,-(sp)
 
-	lea		text_infos,a0
-	lea		translated_palettes+4,a5
+	lea		text_infos,a6
+
+.colours:
+	lea		translated_palettes+2*4,a5 ; Colour 2 (see convert_sprite_to_drawing_code).
+	movem.l	(a5),d0-d7/a0-a5
 
 .loop:
-	move.l	(a0),d0
+	tst.l	(a6)
 	beq		.end
 
-	movem.l	a0/a5,-(sp)
-
-	move.l	d0,a6
-	move.l	8(a0),a0
-	jsr		(a0)
-
-	movem.l	(sp)+,a0/a5
-
-	add.l	#4*4,a0
+	move.l	a6,-(sp)
+	jsr		([8,a6])
+	move.l	(sp)+,a6
+	lea		16(a6),a6
 
 	tst		raster_stages_left
 	bgt		.loop
 	
-	move.l	a0,next_text_infos_address
+	move.l	a6,next_text_infos_address
 
 	move.l	#.resume,next_graphics_routine
 	
@@ -2108,10 +2153,9 @@ draw_text:
 .resume:
 	movem.l	d0-a6,-(sp)
 
-	move.l	next_text_infos_address,a0
-	lea		translated_palettes+4,a5
+	move.l	next_text_infos_address,a6
 
-	bra		.loop
+	bra		.colours
 
 .end:
 	movem.l	(sp)+,d0-a6
@@ -2634,14 +2678,12 @@ translated_palettes:
 compiled_objects:
 	ds.b	$300000
 
-sprite_color_count:
-	ds		1
-
 sprite_colors_count:
 	ds		16
 
-sprite_color_to_register_table:
-	ds		16
+compiling_characters: ; convert_sprite_to_drawing_code makes only the drawing entry.
+	ds.b	1
+	even
 
 sprite_matrix:
 	ds.b	16*16

@@ -108,7 +108,9 @@ F030Arcade's notes on its pinned Hatari build).
   CRTC, palette and sprite registers are ordinary RAM.
 - **The renderer** (`sources/atari/graphics.s`): a double-buffered 256 x 240 true-colour screen.  All 1,885 sprite
   patterns are compiled at load time into 68030 code, in four flips each; a sprite draws itself with its colours in
-  registers.  The text layer uses compiled characters as well; a picture restores and draws only the characters that
+  registers.  Each colour has a fixed register, so a sprite that follows one of the same palette does not load the
+  palette again (about 80% of the sprites in the attract demo), and a single pixel after a gap is written with a
+  displacement.  The text layer uses compiled characters as well; a picture restores and draws only the characters that
   have changed on its screen, and draws again those that sprites touch.  Each screen holds the whole background
   (512 lines and the first 256 again), and the display scrolls by moving over it; the text, which does not scroll, is
   then restored and drawn again in every picture.
