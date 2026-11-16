@@ -24,6 +24,7 @@ TOTAL_NUMBER_OF_SPRITES=1885
 TOTAL_NUMBER_OF_CHARACTERS=128 ; 4096 / (4 * 8) = 128
 SPRITE_THROTTLE_DISPLAY_LINES=170 ; 240*3/4 = 180
 REDRAW_VBLS=4 ; A picture of an unchanged sprite list at most this often.
+SPRITE_GROUP=4 ; Sprites draw_sprites draws between its throttle checks (a power of 2).
 MASK_HASH_SIZE=4096 ; Hash table for finding equal sprite masks.
 
 ; ------------------------------------------------------------------------------
@@ -1502,6 +1503,25 @@ process_sprite_infos:
 .covered:
 	dbf		d7,.loop
 
+	; draw_sprites draws a group of sprites between its checks: fill the
+	; last group with entries that draw nothing.
+
+	move.l	a4,d0
+	sub.l	work_sprite_infos_address_new,d0
+	lsr.l	#4,d0
+	neg		d0
+	and		#SPRITE_GROUP-1,d0
+	bra.s	.next_filler
+
+.filler:
+	move.l	a4,(a4)+ ; Screen address: not 0, which ends the list.
+	move.l	a4,(a4)+
+	move.l	#no_sprite,(a4)+
+	move.l	#no_sprite,(a4)+
+
+.next_filler:
+	dbf		d0,.filler
+
 	clr.l	(a4) ; End marker.
 
 	movem.l	(sp)+,d0-a6
@@ -1695,13 +1715,17 @@ draw_sprites:
 	movem.l	(a5),d0-d7/a0-a5
 
 .loop:
+	rept SPRITE_GROUP ; The list has whole groups (process_sprite_infos).
+
 	move.l	a6,-(sp)
 	jsr		([8,a6])
 	move.l	(sp)+,a6
 	lea		16(a6),a6
 
-	tst		raster_stages_left
-	bgt		.start
+	endr
+
+	tst		raster_stages_left ; Once a group: after each sprite, the
+	bgt		.start ; check cost about 40 cycles, mostly cache misses.
 	
 	move.l	a6,next_sprite_infos_address
 	move.l	#draw_sprites,next_graphics_routine
@@ -2061,6 +2085,7 @@ prepare_text:
 	bra		clear_text
 
 text_no_draw: ; Draw routine of a list entry that only restores.
+no_sprite: ; Draw routine of an entry that fills draw_sprites' last group.
 	rts
 
 ; The text cells a sprite's 16 pixels touch, for each X or Y (sprite
