@@ -147,6 +147,12 @@ ring_seg equ $3e ; The ring segment of the next block.
 render_state equ $3f ; 0 idle, 1-8 the channel to render next, 9 the mix.
 music_welcome equ $3d ; Bit 0: in a wait that takes music packets.
 poll_need equ $3c ; music_poll renders once the SSI is this far past the next segment.
+mask_ptr equ $3a ; The mask pass's next sprite (its info word, X).
+mask_left equ $3b ; Sprites the mask pass has still to draw.
+send_ptr equ $a6 ; send_rle_data's place in the runs while it draws a mask.
+send_left equ $a7 ; Runs send_rle_data has still to send.
+send_allow equ VARS+60 ; Mask sprites send_rle_data may draw before the next run.
+MASK_RUN_PIXELS equ 64 ; A run this long takes the 68030 about as long as a mask sprite the DSP.
 
 POLL_URGENT equ 5*SEG ; While the 68030 waits for the runs: 3 segments left (6 ms).
 POLL_TRANSFER equ 2*SEG ; Before the transfer, which renders nothing: more than 6 left.
@@ -429,59 +435,20 @@ _loop3:
 
 ; -----------------------------------------------------------------------------
 
+; The rest of the mask pass that send_rle_data has set up (and partly done
+; while the 68030 copied runs): the work list's sprites into the mask.
+
 draw_masks:
-	move	x:<work_sprite_infos,r0
-	move	x:<number_of_work_sprite_infos,a
+	move	x:<mask_left,a
+	tst		a
+	jeq		_done
 
-	tst		a a,x0
-	jne		_start
-
-	rts
-
-_start:
-	move	x:(r0)+,a
-
-	do		x0,_loop
-
-	jset	#0,lc,_no_poll ; Music every fourth sprite: a sprite takes
-	jset	#1,lc,_no_poll ; some 15 to 30 us, a block of music 2 ms.
-	jsr		music_poll
-_no_poll:
-	jsr		prepare_mask
-	jsr		sprite_position
-
-	move	b1,y0
-	move	x1,b0
-	move	#>(16+256+16)/8/3/2,y1
-	mac		y0,y1,b a1,n1
-	move	#sprite_mask,r4
-	move	#screen_buffer,r5
-	move	b0,n5
-	move	#<shift_values,r1
-	move	n1,n2
-	move	#<shift_masks,r2
-	move	(r5)+n5
-	move	(r1)+n1
-	move	(r2)+n2
-	move	#(16+256+16)/8/3-1,n5
-
-	; Draw mask.
-
-	move	x:(r1),x0 y:(r4)+,y0
-
-	do		#16,_loop2
-
-	mpy		-x0,y0,a x:(r2),x0 y:(r5)+,y1
-	and		x0,a a0,b
-	or		y1,a y:(r5)-,y1
-	move	a1,y:(r5)+
-	or		y1,b x:(r1),x0 y:(r4)+,y0
-	move	b1,y:(r5)+n5
-_loop2:
-
-	move	x:(r0)+,a
+	do		a1,_loop
+	jsr		draw_mask_next
+	nop
 _loop:
 
+_done:
 	rts
 
 ; -----------------------------------------------------------------------------
@@ -561,6 +528,57 @@ music_poll_done:
 	move	x:<poll_save,a2
 	move	x:<poll_save+1,a1
 	move	x:<poll_save+2,a0
+
+	rts
+
+; Draw the mask pass's next sprite (mask_ptr) into the mask and count it off
+; (mask_left > 0). Music every fourth sprite: a sprite takes some 15 to 30 us,
+; a block of music 2 ms.
+
+draw_mask_next:
+	jset	#0,x:<mask_left,_no_poll
+	jset	#1,x:<mask_left,_no_poll
+	jsr		music_poll
+_no_poll:
+	move	x:<mask_ptr,r0
+	nop
+	move	x:(r0)+,a
+
+	jsr		prepare_mask
+	jsr		sprite_position
+
+	move	b1,y0
+	move	x1,b0
+	move	#>(16+256+16)/8/3/2,y1
+	mac		y0,y1,b a1,n1
+	move	#sprite_mask,r4
+	move	#screen_buffer,r5
+	move	b0,n5
+	move	#<shift_values,r1
+	move	n1,n2
+	move	#<shift_masks,r2
+	move	(r5)+n5
+	move	(r1)+n1
+	move	(r2)+n2
+	move	#(16+256+16)/8/3-1,n5
+
+	move	x:(r1),x0 y:(r4)+,y0
+
+	do		#16,_loop
+
+	mpy		-x0,y0,a x:(r2),x0 y:(r5)+,y1
+	and		x0,a a0,b
+	or		y1,a y:(r5)-,y1
+	move	a1,y:(r5)+
+	or		y1,b x:(r1),x0 y:(r4)+,y0
+	move	b1,y:(r5)+n5
+_loop:
+
+	move	r0,x:<mask_ptr
+	move	x:<mask_left,a
+	move	#>1,x0
+	sub		x0,a
+	move	a1,x:<mask_left
 
 	rts
 
@@ -949,8 +967,8 @@ rle_end:
 	move	r4,y:rle_reader
 
 	move	b1,y:(r5)+ ; Offset.
-	move	#>12,b
-	move	b1,y:(r5)+ ; Jump displacement past the 68030 RLE loop.
+	move	#>20,b
+	move	b1,y:(r5)+ ; Jump displacement past the 68030 RLE loop (graphics.s).
 
 	move	#rle_buffer,x0
 	move	r5,a
@@ -1024,6 +1042,90 @@ _ahead:
 
 _send:
 	move	#rle_buffer,r4
+	move	y:rle_length,a ; Two words a run.
+	asr		a
+	move	a1,x:send_left
+
+	move	y:rle_lines,b
+	tst		b
+	jne		_plain ; Not the last list: the mask is not scanned yet.
+
+	; The last list: the mask pass (draw_masks) may start now. Its list is
+	; the one swap_sprite_infos makes the work list.
+
+	move	x:<display_sprite_infos,x0
+	move	x0,x:<mask_ptr
+	move	x:<number_of_display_sprite_infos,x0
+	move	x0,x:<mask_left
+
+	; The 68030 polls RXDF before each run, so while both words of the
+	; next run wait at the host port the DSP draws sprites of the mask pass
+	; instead of waiting, as the 68030 copies a run. A run's two words go
+	; out together: the 68030 reads the second one without polling. Only if
+	; the runs stay within rle_buffer: masks drawn now must not reach runs
+	; that are not sent yet.
+
+	move	y:rle_length,b
+	move	#>screen_buffer-rle_buffer,x0
+	cmp		x0,b
+	jgt		_plain
+
+	clr		a
+	move	a1,x:send_allow
+
+_next_run:
+	jset	#1,x:m_hsr,_run ; Room at the host port.
+
+	; A mask sprite only while the 68030 copies a long run: on short ones
+	; it would wait for the DSP, and the mask pass costs it nothing after
+	; the transfer, when it draws the text and runs the game.
+
+	move	x:send_allow,a
+	tst		a
+	jeq		_next_run
+	move	x:<mask_left,b
+	tst		b #>1,x0
+	jeq		_next_run
+
+	sub		x0,a
+	move	a1,x:send_allow
+
+	move	r4,x:send_ptr
+	jsr		draw_mask_next
+	move	x:send_ptr,r4
+	jmp		_next_run
+
+_run:
+	movep	y:(r4)+,x:m_htx ; Offset.
+	move	y:(r4)+,b ; Jump displacement.
+	jclr	#1,x:m_hsr,*
+	movep	b1,x:m_htx
+
+	; The run's pixels from its displacement (convert_rle_data: -(pixels +
+	; RLE_LONG_EVEN_BIAS) if even, -(pixels + 1) if odd; at most 288 pixels,
+	; so even runs are the ones from RLE_LONG_EVEN_BIAS up), and from them
+	; the mask sprites that fit while the 68030 copies the run: one for
+	; every MASK_RUN_PIXELS (2^6).
+
+	abs		b #>RLE_LONG_EVEN_BIAS,x0
+	cmp		x0,b
+	jge		_even
+	move	#>1,x0
+_even:
+	sub		x0,b
+	rep		#6
+	asr		b
+	move	b1,x:send_allow
+
+	move	x:send_left,a
+	move	#>1,x0
+	sub		x0,a
+	move	a1,x:send_left
+	jne		_next_run
+
+	jmp		_loop
+
+_plain:
 	move	y:rle_length,b ; Number of words.
 
 	do		b1,_loop
@@ -1048,6 +1150,7 @@ _wipe:
 
 _clean:
 	rts
+
 
 ; -----------------------------------------------------------------------------
 ;

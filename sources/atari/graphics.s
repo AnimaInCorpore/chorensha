@@ -1808,10 +1808,16 @@ clear_sprites_dsp:
 	move	(a2)+,(a3)+
 
 	; Offsets are 0..$7fff bytes (the DSP splits longer gaps), so they
-	; are read as words. The terminal run's displacement of 12 lands on
-	; .skip, right behind this loop.
+	; are read as words. The terminal run's displacement of 20 lands on
+	; .skip, right behind this loop (dsprite.asm rle_end).
+	;
+	; RXDF before each run: in the last list the DSP draws sprites of its
+	; mask pass while the 68030 copies a run, and the next run may not be
+	; there yet. A run's second word follows its first without polling.
 
 .rle_loop:
+	btst	#0,$ffffa202.w
+	beq.s	.rle_loop
 	move	(a1),d0
 	adda.w	d0,a2
 	adda.w	d0,a3
