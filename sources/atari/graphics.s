@@ -1398,7 +1398,7 @@ process_sprite_infos:
 .masked:
 	move.l	d7,$ffffa204.w ; Send number of sprite infos to be sent to the DSP.
 
-	btst	#2,$ffffa202.w ; TRDY: it has taken the count; the rest goes unpolled.
+	btst	#2,$ffffa202.w ; TRDY: it has taken the count.
 	beq		*-6
 
 	move	dsp_scroll_offset,d0
@@ -1406,6 +1406,37 @@ process_sprite_infos:
 	move.l	d0,$ffffa204.w ; Scrolling offset -> DSP (24 bits, signed).
 
 	subq	#1,d7
+
+	; The list goes to the DSP first, in a loop of its own, so that the DSP
+	; cuts the sprites out of its restore mask while the 68030 works out
+	; the addresses, clears the text and draws: the runs are then ready
+	; sooner. TXDE before each word, as this loop may outpace the DSP.
+
+	move	d7,d4
+
+.send:
+	movem	(a0)+,d0-d3
+	ext.l	d2
+	lsl.l	#2+3+2,d2
+	and		#$c000,d3
+	or		32(a1,d2.l),d3
+
+	btst	#1,$ffffa202.w
+	beq.s	*-6
+	move	d3,(a6) ; Flip info + mask index -> DSP.
+	btst	#1,$ffffa202.w
+	beq.s	*-6
+	move	d0,(a6) ; X position -> DSP.
+	btst	#1,$ffffa202.w
+	beq.s	*-6
+	move	d1,(a6) ; Y position -> DSP.
+
+	dbf		d4,.send
+
+	move	(sp)+,sr ; The transfer is over: the VBL may come again.
+
+	move.l	display_sprite_infos_address,a0
+	addq.l	#2,a0
 
 .loop:
 	movem	(a0)+,d0-d3
@@ -1429,18 +1460,9 @@ process_sprite_infos:
 	lsl.l	#2+3+2,d2
 	lea		(a1,d2.l),a5 ; Sprite data.
 
-	move	d3,d1
-	and		#$c000,d1
-	or		32(a5),d1
-	; The DSP reads these without the 68030 polling; spacing them out
-	; leaves it time for an SSI interrupt between two words.
-
-	move	d1,(a6) ; Flip info + mask index -> DSP.
 	rol		#2,d3
 	and		#$3,d3
-	move	d0,(a6) ; X position -> DSP.
 	lea		(a5,d3.w*4),a5
-	move	d5,(a6) ; Y position -> DSP.
 	move.l	(a5),(a4)+ ; Sprite draw address.
 	move.l	16(a5),(a4)+ ; Sprite restore address.
 
@@ -1452,8 +1474,6 @@ process_sprite_infos:
 
 .covered:
 	dbf		d7,.loop
-
-	move	(sp)+,sr
 
 	clr.l	(a4) ; End marker.
 
@@ -1554,6 +1574,14 @@ translate_palettes:
 ; ------------------------------------------------------------------------------
 
 clear_text:
+	tst.b	flip_pending ; The first stage that draws: the work screen is
+	beq.s	.draw ; still on display until the VBL handler has set the
+	; last flip's address.
+	move.l	#clear_text,next_graphics_routine
+
+	rts
+
+.draw:
 	movem.l	d0-a6,-(sp)
 
 	lea		text_infos,a3
@@ -2212,14 +2240,25 @@ render_idle:
 	bne.s	.done
 
 	cmp.l	#process_sprite_infos,next_graphics_routine
-	bne.s	.work ; A picture in progress.
+	bne.s	.in_progress ; A picture in progress.
 
-	tst.b	flip_pending ; The work screen is still the one on display
-	bne.s	.done ; until the VBL handler has set the new address.
+	; A new picture may start before the VBL handler has set the last
+	; flip's address: the stages up to clear_text leave the screen alone
+	; (they send the list to the DSP, which then works on the runs during
+	; the wait), and clear_text waits for the VBL (flip_pending).
 
 	move	game_list_serial,d0
 	cmp		drawn_list_serial,d0
 	beq.s	.done ; Nothing new from the game.
+
+	bra.s	.work
+
+.in_progress:
+	cmp.l	#clear_text,next_graphics_routine
+	bne.s	.work
+
+	tst.b	flip_pending ; The work screen is still the one on display
+	bne.s	.done ; until the VBL handler has set the new address.
 
 .work:
 	st		renderer_lock
