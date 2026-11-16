@@ -93,6 +93,7 @@ scrolling_offset equ $40b3 ; The packet's offset + SCROLL_GUARD.
 ssi_status equ $40b4
 rle_lines equ $40b5 ; Lines of the mask not scanned yet.
 rle_reader equ $40b6 ; The scan's place in the mask.
+staged_count equ $40b7 ; Sprites of the list staged in rle_buffer (stage_sprite_infos).
 stack equ $4100 ; The stack grows down from here (y:-(r7)).
 rle_chunk_boundaries equ $4100 ; X and Y at the same addresses.
 rle_chunk_tables equ rle_chunk_boundaries+32
@@ -572,8 +573,7 @@ int_end: ; The build checks that no P address is used twice.
 
 music_poll_packet:
 	move	r1,x:SAVE+11
-	movep	x:m_hrx,a
-	jsr		receive_music_packet
+	jsr		host_packet
 	move	x:SAVE+11,r1
 	jmp		music_poll_check
 
@@ -602,6 +602,7 @@ music_poll_work:
 	move	#>-1,m3
 
 _render:
+	jsset	#m_hrdf,x:m_hsr,host_packet ; Not a whole block behind a packet.
 	jsr		music_step
 	move	x:<render_state,a
 	tst		a
@@ -742,7 +743,12 @@ _sine:
 	jsr		music_init
 
 _loop:
+	jclr	#1,x:<music_welcome,_receive
+	jsr		>take_sprite_infos ; It came during draw_masks.
+	jmp		>_received
+_receive:
 	jsr		<receive_sprite_infos
+_received:
 	move	#>POLL_URGENT,x0 ; The 68030 waits for the runs.
 	move	x0,x:<poll_need
 	jsr		<draw_inverted_masks
@@ -763,7 +769,8 @@ _sent:
 	move	x0,x:<poll_need ; and take music meanwhile (until the next
 	bset	#0,x:<music_welcome ; sprite packet).
 	jsr		music_flags
-	jsr		<draw_masks
+	bset	#m_hf2,x:m_hcr ; The next list may come during draw_masks
+	jsr		<draw_masks ; (stage_sprite_infos).
 
 	jmp		_loop
 
@@ -1315,6 +1322,85 @@ swap_sprite_infos:
 
 	include	'opm16_warm.asm'
 	include	'opm16_block.asm'
+
+; A packet that arrives while the DSP draws the masks (music_poll) or
+; renders a block there: music for the FIFO, or the next sprite list, which
+; goes into rle_buffer, as the list buffers hold the list draw_masks draws
+; and the one before. Keeps r0 only: at its polls draw_masks needs no other
+; register (a is saved by music_poll), and music_poll_work saves them all.
+; Sprite lists come only then (HF2 is set for draw_masks).
+
+host_packet:
+	movep	x:m_hrx,a
+	jset	#23,a1,receive_music_packet
+
+stage_sprite_infos:
+	bclr	#m_hf2,x:m_hcr
+	bset	#1,x:<music_welcome ; take_sprite_infos.
+
+	jclr	#0,x:m_hsr,*
+	movep	x:m_hrx,b ; Scrolling offset.
+	move	#>SCROLL_GUARD,x1
+	add		x1,b a1,y:staged_count
+	move	b1,y:scrolling_offset
+
+	move	#rle_buffer,r1
+	move	#>$ffff,x1
+	move	#>$fff,y1
+	move	a1,x0
+
+	tst		a
+	jeq		>_none
+
+	do		x0,_loop ; As receive_sprite_infos.
+
+	jclr	#0,x:m_hsr,*
+	movep	x:m_hrx,a
+	and		x1,a
+	move	a1,y:(r1)+
+
+	jclr	#0,x:m_hsr,*
+	movep	x:m_hrx,b
+
+	jclr	#0,x:m_hsr,*
+	movep	x:m_hrx,a
+
+	and		y1,a
+	rep		#12
+	lsl		a
+	and		y1,b
+	add		b,a
+	move	a1,y:(r1)+
+_loop:
+
+_none:
+	rts
+
+; The list stage_sprite_infos put into rle_buffer, into the list buffer that
+; draw_masks has finished with.
+
+take_sprite_infos:
+	bclr	#1,x:<music_welcome
+	bclr	#0,x:<music_welcome
+	bclr	#m_hf3,x:m_hcr
+
+	move	y:staged_count,a
+	move	a1,x:<number_of_work_sprite_infos
+	move	x:<work_sprite_infos,r0
+	move	#rle_buffer,r1
+	asl		a
+	move	a1,x0
+
+	tst		a
+	jeq		>_none
+
+	do		x0,_loop
+	move	y:(r1)+,x1
+	move	x1,x:(r0)+
+_loop:
+
+_none:
+	rts
 
 ext_end: ; Up to P:$0BFF.
 
