@@ -8,11 +8,12 @@ Falcon's DSP works out which background pixels have to be restored in each frame
 **Since 2026 this project is AI-assisted.**  The original port (2014-2015) was written by hand; the changes from 2026
 on were made with AI coding agents (Claude Code) under the author's direction, as the commit history shows.
 
-| | |
-|:-:|:-:|
-| <img src="docs/screenshot-title.png" width="256" alt="Title menu"> | <img src="docs/screenshot-attract.png" width="256" alt="Attract mode"> |
+| | | |
+|:-:|:-:|:-:|
+| <img src="docs/screenshot-title.png" width="256" alt="Title menu"> | <img src="docs/screenshot-attract.png" width="256" alt="Attract mode"> | <a href="https://youtu.be/iYPEBJRyvHs"><img src="https://img.youtube.com/vi/iYPEBJRyvHs/mqdefault.jpg" width="256" alt="Video of the port running"></a> |
 
-Screenshots from Hatari (2026-11-08), at the Falcon's 256 x 240 resolution.
+Screenshots from Hatari (2026-11-08), at the Falcon's 256 x 240 resolution, and a
+[video of the port running](https://youtu.be/iYPEBJRyvHs).
 
 ## Status
 
