@@ -16,37 +16,50 @@ Screenshots from Hatari (2026-11-08), at the Falcon's 256 x 240 resolution.
 
 ## Status
 
-A beta.  The game runs, but it has not been played through, and the changes made in 2026 (the DSP restore runs, the
-256 x 240 modes, the display-line throttle) have not been run on a real Falcon yet.  Checked in Hatari 2.6.1-devel
-(Falcon030 at 16 MHz, TOS 4.04, 14 MB, emulated DSP): the info screen, the title menu and the attract mode on an RGB
-monitor (50 Hz) and on a VGA monitor (60 Hz).
+Beta 2.  The game runs, but it has not been played through, and the changes made in 2026 (the DSP restore runs, the
+256 x 240 modes, the display-line throttle, the DSP sound and music, the scrolling) have not been run on a real Falcon
+yet.  Checked in Hatari 2.6.1-devel (Falcon030 at 16 MHz, TOS 4.04, 14 MB, emulated DSP): the info screen, the title
+menu and the attract mode on an RGB monitor (50 Hz) and on a VGA monitor (60 Hz).
 
-In the attract mode in Hatari the game logic runs every VBL.  Over the first 40 s of the stage 1 demo on RGB, the
-picture keeps up with about 82% of the frames (about 41 pictures a second); before the music it was 86% (about 43).
-VGA has not been measured since the music.  These are Hatari figures, not measurements on real hardware.
+In the attract mode in Hatari the game logic runs every VBL.  Over 1,500 VBLs of the stage 1 demo on RGB the renderer
+finishes 1,419 pictures, about 95% of the frames; the commits before it measured 1,405 to 1,412 on the same window.
+An earlier measurement over the first 40 s of the demo gave about 82% of the frames (about 41 pictures a second); that
+window has not been measured again since.  VGA has not been measured since the music.  These are Hatari figures, not
+measurements on real hardware.
 
 Known limitations:
 
-- The music and the sound effects play through the DSP (see below).  This is newer than release 0.1 and has only been
-  checked in Hatari.
+- The music and the sound effects play through the DSP (see below).  New in release 0.2, and checked only in Hatari.
 - The background scrolls as one layer, with the X68000's slow graphic layer (one line a frame); the fast layer and the
-  sideways scrolling are not there.  The scrolling is newer than release 0.1 and has only been checked in Hatari.
+  sideways scrolling are not there.  The scrolling is new in release 0.2, and checked only in Hatari.
 - The bottom 16 lines of the X68000's 256-line picture are not shown.
+- A 68030 is required: the port does not run on a 68040 or on a CT60's 68060 (see **Running**).
 
 The same source still builds the original X68000 program: the build compares the result with the original `SZ2.X`
 byte for byte.  An Amiga port is not started (`sources/amiga/amiga.s` only prints a message).
 
 ## Download
 
-[Release 0.1](https://github.com/AnimaInCorpore/chorensha/releases/tag/v0.1) (2026-11-08): `chorensha-0.1.zip` holds
-`SZ2.TOS`, its DSP program `DSPRITE.LOD`, the game's data folders and a README.TXT with the controls.  The sources
-may be newer than the release.
+[Release 0.2](https://github.com/AnimaInCorpore/chorensha/releases/tag/v0.2) (beta 2, 2026-11-17): `chorensha-0.2.zip`
+holds `SZ2.TOS`, its DSP program `DSPRITE.LOD`, the game's data folders and a README.TXT with the requirements and the
+controls.  New since 0.1: the music and the sound effects through the DSP, the scrolling background, and a renderer
+that overlaps its work with the DSP's.
+[Release 0.1](https://github.com/AnimaInCorpore/chorensha/releases/tag/v0.1) (2026-11-08) was the first one.  The
+sources may be newer than the release.
 
 ## Running
 
 Requirements: an Atari Falcon030 with 14 MB of RAM (4 MB is not enough: the program needs about 11.2 MB, of which about
 4.6 MB must be ST-RAM), and an RGB monitor or TV (256 x 240, 50 Hz) or a VGA monitor (256 x 240 line-doubled, 60 Hz).
-The program's header lets TOS load it into TT-RAM if there is some (not tested).
+The program's header lets TOS load it into TT-RAM if there is some (not tested); the two screen buffers and the sample
+buffer are asked for as ST-RAM, which Videl and the sound DMA can only read, so about 4.6 MB of ST-RAM is needed
+however much TT-RAM there is.
+
+The port is 68030 only, and will not run on a 68040 or on a CT60's 68060 as it stands.  The sprite dispatch
+(`jsr ([8,a6])` in `graphics.s`, once per sprite and frame) and one 64-bit `mulu.l` in `music.s` use an addressing
+mode and an instruction those CPUs dropped, and the sprite code the game compiles at load time is never pushed out of
+the caches: the 68030's write-through data cache and 256-byte instruction cache make that harmless, a 68060's copyback
+data cache, 8 KB instruction cache and branch cache would not.
 
 Start `SZ2.TOS` from the desktop, from a hard disk or a GEMDOS drive.  `DSPRITE.LOD` and the folders `BGM_DAT`,
 `ETC_DAT`, `PCM_DAT` and `XSP_DAT` must be in the same folder.  The info screen waits for a key; the title menu's EXIT
@@ -134,7 +147,12 @@ F030Arcade's notes on its pinned Hatari build).
   Timer B, one or two events a line, detected each frame), so that the game gets the rest of the frame.  When the
   game waits for the next VBL, the renderer goes on from there (`render_idle`), and the VBL handler leaves it alone
   meanwhile.  After a flip it waits for the VBL that shows the new screen, and restore runs that do not fit into the
-  frame wait for the next one.  A picture starts only for a new sprite list from the game (or every 4 VBLs, for the text layer).
+  frame wait for the next one.  A picture starts only for a new sprite list from the game (or every 4 VBLs, for the
+  text layer).  The sprite loop tests the throttle once per group of four sprites instead of after every one (the test
+  cost about 40 cycles a sprite, mostly instruction cache misses behind the sprite's code), so a stage may run up to
+  three sprites past the line.  The two sides also overlap: while the DSP draws the masks of the list it has just cut,
+  the 68030 does the work that needs no DSP (the palettes and the text lists), and the DSP takes the next list before
+  it draws those masks rather than after, so neither waits for the other.
 - **The machine** (`machine.s`): the Videl modes and the interrupt vectors; `input.s` the IKBD (keyboard, joystick,
   mouse); `audio.s` the sample buffer and the conversion of the effects.  `sources/atari/adpcm.s` is a separate tool
   that turned the X68000's ADPCM sound effects into the samples in `PCM_DAT`.
@@ -155,7 +173,9 @@ F030Arcade's notes on its pinned Hatari build).
                            sz2.tos, sz2_dbg.tos and dsprite.lod here (not in git)
     binaries/amiga/        the game's data for an Amiga port
     binaries/x68000/       the X68000 disks (CH68_101_A: system, CH68_101_B: game) and the original SZ2.X as hex
-    docs/                  the X68000 I/O map (_IOMAP.MAN.txt) and the README's screenshots
+    docs/                  the X68000 I/O map (_IOMAP.MAN.txt), the README's screenshots and release-readme.txt
+                           (the README.TXT of the release archive; @VERSION@ and @COMMIT@ are filled in when it is
+                           packed)
     tools/                 vasm, vlink, Motorola's DSP56000 assembler and cldlod, human68k-ld and -objcopy;
                            tools/mcdrv (unpacking, disassembling and running MCDRV), tools/opm16 (the DSP's YM2151:
                            test program, C++ model, tables), check_dsp_listing.py (run by the build scripts)
