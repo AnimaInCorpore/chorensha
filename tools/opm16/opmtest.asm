@@ -92,6 +92,7 @@ CAPTURE		equ	$2000		; first 128 blocks
 
 	include	'opm16_hot.asm'
 	include	'opm16_warm.asm'
+	include	'opm16_env.asm'
 
 ; Mix the block into the SSI segment, clearing the mixes for the next.
 emit:

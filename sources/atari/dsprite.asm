@@ -86,7 +86,7 @@ MIX_C equ $4000
 MIX_L equ MIX_C+BLOCK
 MIX_R equ MIX_C+2*BLOCK
 FBB equ $4090 ; Older history, onward gain, history gain (modulo 3).
-sprite_mask equ $40a0 ; 16 words.
+sprite_mask equ $40a0 ; 16 words; the word in front takes a store of horizontal_flip_sprite_mask.
 sprite_convert_shifts equ $40b0 ; 2 words.
 rle_length equ $40b2
 scrolling_offset equ $40b3 ; The packet's offset + SCROLL_GUARD.
@@ -181,64 +181,88 @@ peek	macro	register
 	org	p:$40
 ; -----------------------------------------------------------------------------
 
-; Wait for a packet: music for the FIFO, or the sprites of the next picture.
+; The mask routines below are here, in internal P, because they work on
+; external data: an instruction fetched from external P pays two cycles more
+; for each external word it reads or writes.
 
-receive_sprite_infos:
-	bset	#m_hf2,x:m_hcr ; Ready for a packet.
-	bset	#0,x:<music_welcome
-	jsr		music_flags
+;
+; r0 = packed sprite mask address (X memory).
+;
+convert_packed_sprite_mask1:
+	move	#<sprite_convert_masks,r1
 
-_wait:
-	jsr		music_step
-	jclr	#m_hrdf,x:m_hsr,_wait
+	move	#sprite_mask,r4
+	move	#sprite_convert_shifts,r5
 
-	movep	x:m_hrx,a
-	jclr	#23,a1,_sprites
-	jsr		>receive_music_packet
-	jmp		_wait
+	move	x:(r0)+,x1
 
-_sprites:
-	bclr	#m_hf2,x:m_hcr
-	bclr	#0,x:<music_welcome
-	bclr	#m_hf3,x:m_hcr
+	do		#10/2,_loop
 
-	jclr	#0,x:m_hsr,*
-	movep	x:m_hrx,b ; Scrolling offset.
-	move	#>SCROLL_GUARD,x1
-	add		x1,b
-	move	b1,y:scrolling_offset
-
-	move	x:<work_sprite_infos,r0
-	move	#>$ffff,x1
-	move	#>$fff,y1
-	move	a1,x0
-
-	tst		a
-	jeq		_none
-
-	do		x0,_loop
-
-	jclr	#0,x:m_hsr,*
-	movep	x:m_hrx,a
-	and		x1,a
-	move	a1,x:(r0)+ ; Flip info + mask index.
-
-	jclr	#0,x:m_hsr,*
-	movep	x:m_hrx,b ; X position.
-
-	jclr	#0,x:m_hsr,*
-	movep	x:m_hrx,a ; Y position.
-
-	and		y1,a
-	rep		#12
-	lsl		a
-	and		y1,b
-	add		b,a
-	move	a1,x:(r0)+ ; Y << 12 | X.
+	tfr		x1,a x:(r1)+,x0 y:(r5)+,y0
+	and		x0,a x:(r0)+,y1
+	mpy		x1,y0,a a1,y:(r4)+
+	mpy		y1,y0,b x:(r1)-,x0 y:(r5)-,y0
+	and		x0,b a0,x1
+	or		x1,b x:(r0)+,x1
+	mpy		y1,y0,a b1,y:(r4)+
+	move	a0,y:(r4)+
 _loop:
 
-_none:
-	move	x0,x:<number_of_work_sprite_infos
+	tfr		x1,a x:(r1)+,x0
+	and		x0,a
+	move	a,y:(r4)+
+
+	rts
+
+; -----------------------------------------------------------------------------
+
+vertical_flip_sprite_mask:
+	move	#sprite_mask,r4
+	move	#sprite_mask+16,r5
+
+	do		#16/2,_loop
+
+	move	y:(r4),x0
+	move	y:-(r5),x1
+	move	x1,y:(r4)+
+	move	x0,y:(r5)
+_loop:
+
+	rts
+
+; -----------------------------------------------------------------------------
+
+; Each line is 16 bits at the top of its word. A product with 2^-16 leaves
+; the upper byte in a1 and the lower one at the top of a0; both are taken as
+; signed numbers, so the table is indexed from its middle and no byte needs
+; masking. The loop stores a line together with the next one's first
+; product: its first store goes to the word in front of the mask, its last
+; read takes the word behind it.
+
+horizontal_flip_sprite_mask:
+	move	#bit_reverse_table+128,r0
+
+	move	#sprite_mask,r4
+	move	#sprite_mask-1,r5
+
+	move	#>$000080,y0 ; 2^-16.
+	move	#>$008000,y1 ; 2^-8.
+
+	move	y:(r4)+,x0
+
+	do		#16,_loop
+
+	mpy		x0,y0,a a0,y:(r5)+ ; a1 = upper byte, a0 = lower byte << 16.
+	move	a1,n0
+	move	a0,x1
+	mpy		x1,y0,b x:(r0+n0),x0 ; b1 = lower byte; x0 = the upper one reversed.
+	move	b1,n0
+	mpy		x0,y0,a ; a0 = it << 8.
+	move	x:(r0+n0),x1
+	mac		x1,y1,a y:(r4)+,x0 ; a0 += the lower one reversed << 16.
+_loop:
+
+	move	a0,y:(r5)+
 
 	rts
 
@@ -528,6 +552,77 @@ _wrap:
 
 	rts
 
+	include	'opm16_env.asm'
+
+int_end: ; The build checks that no P address is used twice.
+
+; -----------------------------------------------------------------------------
+	org	p:$200 ; External code, up to P:$0BFF.
+; -----------------------------------------------------------------------------
+
+; Wait for a packet: music for the FIFO, or the sprites of the next picture.
+
+receive_sprite_infos:
+	bset	#m_hf2,x:m_hcr ; Ready for a packet.
+	bset	#0,x:<music_welcome
+	jsr		music_flags
+
+_wait:
+	jsr		music_step
+	jclr	#m_hrdf,x:m_hsr,_wait
+
+	movep	x:m_hrx,a
+	jclr	#23,a1,_sprites
+	jsr		>receive_music_packet
+	jmp		_wait
+
+_sprites:
+	bclr	#m_hf2,x:m_hcr
+	bclr	#0,x:<music_welcome
+	bclr	#m_hf3,x:m_hcr
+
+	jclr	#0,x:m_hsr,*
+	movep	x:m_hrx,b ; Scrolling offset.
+	move	#>SCROLL_GUARD,x1
+	add		x1,b
+	move	b1,y:scrolling_offset
+
+	move	x:<work_sprite_infos,r0
+	move	#>$ffff,x1
+	move	#>$fff,y1
+	move	a1,x0
+
+	tst		a
+	jeq		_none
+
+	do		x0,_loop
+
+	jclr	#0,x:m_hsr,*
+	movep	x:m_hrx,a
+	and		x1,a
+	move	a1,x:(r0)+ ; Flip info + mask index.
+
+	jclr	#0,x:m_hsr,*
+	movep	x:m_hrx,b ; X position.
+
+	jclr	#0,x:m_hsr,*
+	movep	x:m_hrx,a ; Y position.
+
+	and		y1,a
+	rep		#12
+	lsl		a
+	and		y1,b
+	add		b,a
+	move	a1,x:(r0)+ ; Y << 12 | X.
+_loop:
+
+_none:
+	move	x0,x:<number_of_work_sprite_infos
+
+	rts
+
+; -----------------------------------------------------------------------------
+
 ; From the sprite code: take a music packet if one came (only while the DSP
 ; asks for them, in draw_masks), and render a block if one is due. Keeps every
 ; register but r6/m6; changes the condition codes.
@@ -565,10 +660,6 @@ music_poll_done:
 
 	rts
 
-int_end: ; The build checks that no P address is used twice.
-
-; -----------------------------------------------------------------------------
-	org	p:$200 ; External code, up to P:$0BFF.
 ; -----------------------------------------------------------------------------
 
 music_poll_packet:
@@ -755,7 +846,6 @@ _received:
 	jsr		rle_start
 _runs:
 	jsr		<create_rle_data
-	jsr		convert_rle_data
 	jsr		send_rle_data
 	move	y:rle_lines,a
 	tst		a
@@ -1029,15 +1119,45 @@ _ahead:
 	jsr		music_step
 	jmp		_top_up
 
+	; A run in the buffer is its offset and its length, both in bytes. The
+	; 68030 takes the length as a jump displacement into its restore code:
+	; minus the pixels, minus one for an odd number of them and minus
+	; RLE_LONG_EVEN_BIAS for an even one. It is worked out here, before the
+	; run's offset goes out and while the 68030 restores the run before:
+	; the DSP would only wait for the host port meanwhile. Nothing may
+	; come between a run's offset and its length, as the 68030 reads the
+	; host port without polling. The terminal run goes out as it is.
+
 _send:
 	move	#rle_buffer,r4
-	move	y:rle_length,b ; Number of words.
+	move	#rle_buffer+1,r5
+	move	#2,n4
+	move	#2,n5
+	move	#>RLE_LONG_EVEN_BIAS,x0
+	move	y:rle_length,a
+	asr		a #>1,x1 ; Number of runs.
+	sub		x1,a ; Runs before the terminal one.
+	jeq		>_terminal
 
-	do		b1,_loop
+	do		a1,_loop
 
+	btst	#1,y:(r5) ; Odd number of pixels?
+	tfr		x0,b y:(r5)+n5,a
+	tcs		x1,b
+	asr		a ; Number of pixels.
+	add		b,a
+	neg		a
+	jclr	#1,x:m_hsr,*
+	movep	y:(r4)+n4,x:m_htx
+	jclr	#1,x:m_hsr,*
+	movep	a1,x:m_htx
+_loop:
+
+_terminal:
 	jclr	#1,x:m_hsr,*
 	movep	y:(r4)+,x:m_htx
-_loop:
+	jclr	#1,x:m_hsr,*
+	movep	y:(r4)+,x:m_htx
 
 	; Values behind rle_buffer lie in the mask: clear them, or they would
 	; be pixels to restore in the next picture.
@@ -1153,67 +1273,6 @@ sprite_position:
 
 ; -----------------------------------------------------------------------------
 
-; Convert each run's byte length to a jump displacement into the 68030
-; longword restoration blocks. Odd runs end with one word move. This runs
-; before the transfer: the 68030 reads the host port without polling, so
-; send_rle_data must not spend time between a run's offset and its length.
-; The terminal run already holds its displacement.
-
-convert_rle_data:
-	move	y:rle_length,a
-	asr		a #>1,x1 ; Number of runs.
-	sub		x1,a #rle_buffer+1,r4 ; Runs before the terminal one.
-	jeq		<_skip
-
-	move	#>RLE_LONG_EVEN_BIAS,x0
-	move	#2,n4
-
-	do		a1,_loop
-
-	btst	#1,y:(r4) ; Odd number of pixels?
-	tfr		x0,b y:(r4),a
-	tcs		x1,b
-	asr		a ; Number of pixels.
-	add		b,a
-	neg		a
-	move	a1,y:(r4)+n4
-_loop:
-
-_skip:
-	rts
-
-; -----------------------------------------------------------------------------
-;
-; r0 = packed sprite mask address (X memory).
-;
-convert_packed_sprite_mask1:
-	move	#<sprite_convert_masks,r1
-
-	move	#sprite_mask,r4
-	move	#sprite_convert_shifts,r5
-
-	move	x:(r0)+,x1
-
-	do		#10/2,_loop
-
-	tfr		x1,a x:(r1)+,x0 y:(r5)+,y0
-	and		x0,a x:(r0)+,y1
-	mpy		x1,y0,a a1,y:(r4)+
-	mpy		y1,y0,b x:(r1)-,x0 y:(r5)-,y0
-	and		x0,b a0,x1
-	or		x1,b x:(r0)+,x1
-	mpy		y1,y0,a b1,y:(r4)+
-	move	a0,y:(r4)+
-_loop:
-
-	tfr		x1,a x:(r1)+,x0
-	and		x0,a
-	move	a,y:(r4)+
-
-	rts
-
-; -----------------------------------------------------------------------------
-
 ; a = a music packet's header ($80nnnn): its n words go into the FIFO, then
 ; the blocks their waits add up to. HF3 drops first, so that the 68030 waits
 ; for the FIFO to be measured again.
@@ -1247,49 +1306,6 @@ _blocks:
 	jmp		music_flags
 
 ; -----------------------------------------------------------------------------
-
-vertical_flip_sprite_mask:
-	move	#sprite_mask,r4
-	move	#sprite_mask+16,r5
-
-	do		#16/2,_loop
-
-	move	y:(r4),x0
-	move	y:-(r5),x1
-	move	x1,y:(r4)+
-	move	x0,y:(r5)
-_loop:
-
-	rts
-
-; -----------------------------------------------------------------------------
-
-horizontal_flip_sprite_mask:
-	move	#bit_reverse_table,r0
-
-	move	#sprite_mask,r4
-	move	#sprite_convert_shifts,r5
-
-	move	#>$ff,y1
-
-	move	y:(r5)+,y0
-
-	do		#16,_loop
-
-	move	y:(r4),x0
-	mpy		x0,y0,a x0,x1
-	and		y1,a y:(r5)-,y0
-	mpy		x1,y0,b a1,n0
-	and		y1,b y:(r5)+,y0
-	move	x:(r0+n0),x0
-	mpy		x0,y0,a b1,n0
-	move	y:(r5)-,y0
-	move	x:(r0+n0),x0
-	mac		x0,y0,a y:(r5)+,y0
-	move	a0,y:(r4)+
-_loop:
-
-	rts
 
 ; -----------------------------------------------------------------------------
 
@@ -1484,14 +1500,9 @@ number_of_display_sprite_infos:
 	org	x:bit_reverse_table ; External X RAM.
 ; -----------------------------------------------------------------------------
 
-	dc		$00,$80,$40,$C0,$20,$A0,$60,$E0,$10,$90,$50,$D0,$30,$B0,$70,$F0
-	dc		$08,$88,$48,$C8,$28,$A8,$68,$E8,$18,$98,$58,$D8,$38,$B8,$78,$F8
-	dc		$04,$84,$44,$C4,$24,$A4,$64,$E4,$14,$94,$54,$D4,$34,$B4,$74,$F4
-	dc		$0C,$8C,$4C,$CC,$2C,$AC,$6C,$EC,$1C,$9C,$5C,$DC,$3C,$BC,$7C,$FC
-	dc		$02,$82,$42,$C2,$22,$A2,$62,$E2,$12,$92,$52,$D2,$32,$B2,$72,$F2
-	dc		$0A,$8A,$4A,$CA,$2A,$AA,$6A,$EA,$1A,$9A,$5A,$DA,$3A,$BA,$7A,$FA
-	dc		$06,$86,$46,$C6,$26,$A6,$66,$E6,$16,$96,$56,$D6,$36,$B6,$76,$F6
-	dc		$0E,$8E,$4E,$CE,$2E,$AE,$6E,$EE,$1E,$9E,$5E,$DE,$3E,$BE,$7E,$FE
+; A byte's bits in reverse order, for the byte as a signed number from
+; bit_reverse_table+128: the first half is for $80 to $FF.
+
 	dc		$01,$81,$41,$C1,$21,$A1,$61,$E1,$11,$91,$51,$D1,$31,$B1,$71,$F1
 	dc		$09,$89,$49,$C9,$29,$A9,$69,$E9,$19,$99,$59,$D9,$39,$B9,$79,$F9
 	dc		$05,$85,$45,$C5,$25,$A5,$65,$E5,$15,$95,$55,$D5,$35,$B5,$75,$F5
@@ -1500,6 +1511,14 @@ number_of_display_sprite_infos:
 	dc		$0B,$8B,$4B,$CB,$2B,$AB,$6B,$EB,$1B,$9B,$5B,$DB,$3B,$BB,$7B,$FB
 	dc		$07,$87,$47,$C7,$27,$A7,$67,$E7,$17,$97,$57,$D7,$37,$B7,$77,$F7
 	dc		$0F,$8F,$4F,$CF,$2F,$AF,$6F,$EF,$1F,$9F,$5F,$DF,$3F,$BF,$7F,$FF
+	dc		$00,$80,$40,$C0,$20,$A0,$60,$E0,$10,$90,$50,$D0,$30,$B0,$70,$F0
+	dc		$08,$88,$48,$C8,$28,$A8,$68,$E8,$18,$98,$58,$D8,$38,$B8,$78,$F8
+	dc		$04,$84,$44,$C4,$24,$A4,$64,$E4,$14,$94,$54,$D4,$34,$B4,$74,$F4
+	dc		$0C,$8C,$4C,$CC,$2C,$AC,$6C,$EC,$1C,$9C,$5C,$DC,$3C,$BC,$7C,$FC
+	dc		$02,$82,$42,$C2,$22,$A2,$62,$E2,$12,$92,$52,$D2,$32,$B2,$72,$F2
+	dc		$0A,$8A,$4A,$CA,$2A,$AA,$6A,$EA,$1A,$9A,$5A,$DA,$3A,$BA,$7A,$FA
+	dc		$06,$86,$46,$C6,$26,$A6,$66,$E6,$16,$96,$56,$D6,$36,$B6,$76,$F6
+	dc		$0E,$8E,$4E,$CE,$2E,$AE,$6E,$EE,$1E,$9E,$5E,$DE,$3E,$BE,$7E,$FE
 
 ; Run scan tables for a 6-bit chunk c of boundaries (bit 5 first), indexed
 ; by c as a signed number from rle_chunk_tables. X and Y use the same
