@@ -1,64 +1,72 @@
-Cho Ren Sha 68k for the Atari Falcon030, @VERSION@
-==================================================
+Cho Ren Sha 68k for the Atari Falcon030
+=======================================
+Release @VERSION@
 
-Cho Ren Sha 68k, the X68000 vertical shooter (c) 1995 by Famibe No Yosshin, on the Atari Falcon030. The game's
-own 68000 program runs natively; a small layer stands in for the X68000 hardware. Sprites are compiled 68030
-code, and the Falcon's DSP works out which background pixels have to be restored each frame, plays the sound
-effects and runs a YM2151 of its own for the music.
-Source and documentation:
+Cho Ren Sha 68k, the X68000 vertical shooter (c) 1995 by Famibe No Yosshin, on the Atari Falcon030.  The game's
+own 68000 program runs on the Falcon as it is; a small layer stands in for the X68000's hardware, and the
+Falcon's DSP helps with the drawing and makes the sound.
+
+Source, screenshots and a video of it running:
 https://github.com/AnimaInCorpore/chorensha  (commit @COMMIT@)
 
-Requirements: an Atari Falcon030 with 14 MB of RAM (4 MB is not enough: the program needs about 11.2 MB, of
-which about 4.6 MB must be ST-RAM), an RGB monitor or TV (256 x 240, 50 Hz) or a VGA monitor (256 x 240
-line-doubled, 60 Hz).  Start SZ2.TOS from the desktop from a hard disk or a GEMDOS drive.  DSPRITE.LOD and the
-four ..._DAT folders must stay in the same folder as SZ2.TOS.  Press SPACE at the info screen to start.
 
-A 68030 is required.  The program does not run on a 68040 or on a CT60's 68060: it uses an addressing mode and
-an instruction those CPUs dropped, and it does not flush the caches after compiling its sprite code.  If the
-machine has TT-RAM the program is loaded into it, and the screens and the sound samples are kept in ST-RAM;
-that path has not been tested on hardware.
+What you need
+-------------
 
-New in @VERSION@
-----------------
+A Falcon030 with 14 MB of RAM, and an RGB monitor or a TV (50 Hz) or a VGA monitor (60 Hz).  The picture is
+256 x 240 either way.  4 MB is not enough: of the memory the game needs, about 4.6 MB has to be the Falcon's
+own ST-RAM, because the screen and the sound samples can only live there.  Fast RAM is used for the rest if
+the machine has any, though that has not been tried yet.
 
-- The music and the sound effects now play through the DSP.  MCDRV, the game's own music driver, runs on the
-  68030 as it does on the X68000, and its YM2151 register writes become a stream that the DSP plays with a
-  YM2151 of its own, 8 channels of 4 operators, between its sprite work.
-- The background scrolls, as one layer (the X68000's slow graphic layer, one line a frame).
-- The renderer overlaps its work with the DSP's: it prepares the palettes and the text while the DSP draws the
-  sprite masks, and the DSP takes the next sprite list before it draws those masks instead of after.
-- The sprite loop tests the display-line throttle once per group of four sprites instead of after every sprite.
+A 68030 is required.  The game will not run on a 68040 or on a CT60's 68060: it uses an addressing mode and an
+instruction those chips dropped, and it writes its own drawing code as it loads without clearing the caches
+afterwards, which only the 68030's simpler caches make safe.
 
-Verification status
--------------------
 
-This is a beta.  Checked for this release in Hatari 2.6.1-devel (Falcon030 at 16 MHz, TOS 4.04, 14 MB,
-emulated DSP): the info screen, the title menu and the attract mode on an RGB monitor (50 Hz) and on a VGA
-monitor (60 Hz).  The game was not played through, and the changes made in 2026 (the DSP restore runs, the
-256 x 240 modes, the display-line throttle, the DSP sound and music, the scrolling) have not been run on a
-real Falcon.
+Starting it
+-----------
 
-In the attract mode in Hatari the game logic runs every VBL, and over 1,500 VBLs of the stage 1 demo on RGB
-the renderer finishes 1,419 pictures, about 95% of the frames.  VGA has not been measured since the music.
-These are Hatari figures, not measurements on real hardware.
-
-Known limitations:
-- The music and the sound effects through the DSP are new in this release and have only been checked in Hatari.
-- The background scrolls as one layer; the fast layer and the sideways scrolling are not there.
-- The bottom 16 lines of the X68000's 256-line picture are not shown.
-- A 68030 is required (see above).
-
-Controls
---------
+Put SZ2.TOS, DSPRITE.LOD and the four ..._DAT folders together in one folder on a hard disk or a GEMDOS drive,
+and start SZ2.TOS from the desktop.  The info screen waits for a key.  The title menu's EXIT returns to the
+desktop.
 
 Keyboard:   cursor keys  move           Left Shift  button 1           Control  button 2
 Joystick:   joystick port 1 moves; the right mouse button is button 2
 Jaguar pad: in the Falcon's enhanced joystick port A: D-pad move, B button 1, A button 2
 
-The title menu's EXIT returns to the desktop.
 
-Files
------
+What is new
+-----------
+
+- Music and sound effects.  The game's own music driver still runs on the processor, and what it would have
+  written to the X68000's YM2151 sound chip is passed to the DSP, which imitates that chip and mixes the music
+  with the game's sound effects.
+- The background scrolls, in one layer.
+- A faster renderer: the processor and the DSP now work side by side wherever they can instead of waiting for
+  each other, and sprites that share a palette are drawn one after another without setting their colours up
+  again.
+
+
+How far along it is
+-------------------
+
+This is a beta.  The game runs, with music and sound, but it has not been played through, and none of this
+year's work has been tried on a real Falcon.  It was checked for this release in the Hatari emulator
+(Falcon030, TOS 4.04, 14 MB, emulated DSP) on both kinds of monitor: the info screen, the title menu and the
+attract mode.  In the attract demo the game itself keeps full speed, and the screen is redrawn for about 19
+frames out of 20 over the stretch that was measured; an earlier and longer measurement gave about 4 out of 5.
+Both are emulator figures, not measurements on real hardware.
+
+Still missing or unproven:
+- The music and the sound effects are new in this release and have only been heard in the emulator.
+- The background scrolls in one layer only, and not sideways.
+- The bottom 16 lines of the X68000's picture are not shown.
+- A 68030 is needed (see above).
+
+
+What is in here
+---------------
+
 SZ2.TOS       the program
-DSPRITE.LOD   the DSP program (loaded by SZ2.TOS)
+DSPRITE.LOD   the DSP program, loaded by SZ2.TOS
 BGM_DAT, ETC_DAT, PCM_DAT, XSP_DAT   the game's data
