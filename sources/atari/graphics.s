@@ -26,7 +26,7 @@ TOTAL_NUMBER_OF_CHARACTERS=128 ; 4096 / (4 * 8) = 128
 SPRITE_THROTTLE_DISPLAY_LINES=170 ; 240*3/4 = 180
 REDRAW_VBLS=4 ; A picture of an unchanged sprite list at most this often.
 PICTURE_VBLS_MAX=4 ; The slowest picture cadence finish_picture settles on, in VBLs.
-PICTURE_EARLY=16 ; Pictures in a row that are ready a VBL early before the cadence gets faster (a quarter as many per slower step).
+PICTURE_EARLY=8 ; Pictures in a row that are ready a VBL early before a cadence of 2 VBLs gets faster (a quarter of them at 3, an eighth at 4).
 SPRITE_GROUP=4 ; Sprites draw_sprites draws between its throttle checks (a power of 2).
 MASK_HASH_SIZE=4096 ; Hash table for finding equal sprite masks.
 
@@ -2272,8 +2272,8 @@ finish_picture:
 	sub		show_due,d0
 	bpl.s	.not_early
 
-	; The slower the cadence, the fewer early pictures it takes: a quarter as
-	; many for each VBL more, as they are further apart.
+	; The slower the cadence, the fewer early pictures it takes (a quarter
+	; of them at 3 VBLs, an eighth at 4), as they are further apart.
 
 	addq	#1,early_pictures
 
@@ -2281,7 +2281,7 @@ finish_picture:
 	bcs.s	.one_more
 	beq.s	.two_more
 
-	cmp		#PICTURE_EARLY/16,early_pictures
+	cmp		#PICTURE_EARLY/8,early_pictures
 	bra.s	.counted
 
 .two_more:
