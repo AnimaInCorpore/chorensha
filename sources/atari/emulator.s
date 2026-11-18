@@ -45,6 +45,8 @@ vbl_handler:
 ;	rts
 
 ;.no_exit_request:
+	bsr		show_held_picture ; A picture that waited for this VBL (graphics.s).
+
 	move.b	display_window_address+1,$ffff8201.w
 	move.b	display_window_address+2,$ffff8203.w
 	move.b	display_window_address+3,$ffff820d.w
