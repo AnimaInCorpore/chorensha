@@ -81,3 +81,70 @@ python3 mkstream.py logs/SZ2_S1.log S1.BIN 60 4 48
 
 Memory: X internal holds the modulation rings, Y internal the sine, and
 X/Y external the tables, records, mixes and the 512-word host FIFO.
+
+## Not done: a 1024-step sine
+
+F030MXDRV (commit `773294f`) and the F030Arcade games that use its kernel
+(`bc35f34`) replaced the DSP's 256-step sine ROM with the chip's own
+1024-step waveform. Its largest effect was on patches without feedback. It
+was looked at for this kernel on 2026-11-18 and not built; this is what a
+later implementation has to solve.
+
+**The loops need no change in cost.** They already run in internal P and use
+the phase index as the table address (`move b1,r0`, `y:(r0)`). With
+`y1 = $3ff` the table is `Y:$0000-$03ff`: the first 256 words are internal
+Y RAM, where the ROM copy is now, and the other 768 are external Y
+(`Y:$0100-$03ff`). A read from internal P of external Y costs no extra bus
+cycle. An indexed read from a table elsewhere (`y:(r0+n0)`) would cost one
+cycle per operator and frame, so the table should stay at address 0.
+
+**What follows the table size:**
+
+- `y1` (and the masks in `opm16_block.asm` and `opm16_warm.asm` that mean the
+  sine index): `$ff` becomes `$3ff`.
+- `INC_K`: `256/510` becomes `1024/2046` of 2^23, because the mask is also
+  the multiplier of the increment.
+- The modulator gain `1021` (8168/8 index units) and `FBK` are in index
+  units: four times as large.
+- The table itself: the chip's waveform at zero envelope attenuation, from
+  ymfm's quarter log-sine and power tables (F030MXDRV
+  `tools/generate_ym2151_tables.py` has it), scaled so that its peak of 8168
+  is full scale, since the gains here already carry the 8168. `gentab.py`
+  would write it for the DSP and for `model2.cpp` (`T_YROM`, `idx()`, `adv()`).
+
+**The game's DSP program has no room for it.** `dsprite.asm` as of `dd2e48a`:
+
+| | free words |
+|---|---|
+| external code, `P:$0200-$0BFF` | 1 |
+| internal code, `P:$0040-$01FF` | 15 |
+| X, sprite masks up to `X:$7FF8` | 7 |
+| Y, 462 masks of room for about 449 | about 143 |
+
+External `Y:$0100-$03ff` is the same memory as `Y:$4100-$43ff` and
+`P:$0100-$03ff`. It holds the RLE chunk boundaries and tables and the 32
+operator phases (`$4100-$415F`, each an X and a Y word at one address) and
+the first 512 words of the external code. `Y:$4160-$41FF` looks unused.
+
+One way to make the room:
+
+1. Replace `TAB_GAIN` (1024 words of 2^(-t/64)) by a 64-entry fraction table
+   and a shift by `t >> 6`. That frees about 944 words in X for a few cycles
+   per operator and block; the model has to round the same way.
+2. Move about 600 words of external code to the freed X memory
+   (`P:$47C0` onwards). Jumps to and from it are long ones: the short forms
+   reach `$0FFF` only, and `check_dsp_listing.py` has to stay clean.
+3. Give the RLE chunk tables and the phases a new address that is free in
+   both X and Y, or read their two halves separately. This is the part that
+   touches the sprite code, and nothing checks that code but running the
+   game.
+
+A 512-step table is not much easier: `Y:$0100-$01ff` still holds the RLE
+tables and the phases.
+
+**Order worth keeping:** first the kernel alone (`opmtest.asm` has its own,
+roomier memory map), with the table size as a setting so that the game
+stays at 256 steps, and `verify.sh` showing the DSP equal to the model; then
+the game's memory. The scripts here are written for macOS (Hatari's command
+FIFO, `clang++`, the `_mac` tools), and the stream logs in `logs/` are not
+in the repository, so on Windows they need porting first.
