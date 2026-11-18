@@ -112,12 +112,12 @@ cycle per operator and frame, so the table should stay at address 0.
   is full scale, since the gains here already carry the 8168. `gentab.py`
   would write it for the DSP and for `model2.cpp` (`T_YROM`, `idx()`, `adv()`).
 
-**The game's DSP program has no room for it.** `dsprite.asm` as of `dd2e48a`:
+**The game's DSP program has no room for it.** `dsprite.asm` as of `134139c`:
 
 | | free words |
 |---|---|
-| external code, `P:$0200-$0BFF` | 1 |
-| internal code, `P:$0040-$01FF` | 15 |
+| external code, `P:$0200-$0BFF` | 7 |
+| internal code, `P:$0040-$01FF` | 6 |
 | X, sprite masks up to `X:$7FF8` | 7 |
 | Y, 462 masks of room for about 449 | about 143 |
 
