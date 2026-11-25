@@ -43,8 +43,8 @@ sources here may be newer than the release.
 ## Running
 
 You need a Falcon030 with 14 MB of RAM and either an RGB monitor or a TV (50 Hz) or a VGA monitor (60 Hz); the
-picture is 256 x 240 either way.  4 MB is not enough: the game needs about 11.2 MB, and about 4.6 MB of that has to
-be the Falcon's own ST-RAM, because the screen and the sound samples can only live there.  Fast RAM is used for the
+picture is 256 x 240 either way.  4 MB is not enough: the game needs about 12 MB, and about 5.4 MB of that has to
+be the Falcon's own ST-RAM, because the screens and the sound samples can only live there.  Fast RAM is used for the
 rest if the machine has any, though that has not been tried yet.
 
 A 68030 is required.  The game will not run on a 68040 or on a CT60's 68060: it uses an addressing mode and an
@@ -75,15 +75,16 @@ work went into making that fast:
   it is loaded, so drawing a sprite is a subroutine call: no loops, and no tests for the transparent pixels.  The
   colours stay in the processor's registers, and sprites that share a palette follow one another without loading them
   again.  The text is drawn the same way.
-- **The DSP tidies up.**  Rather than clear the screen, the DSP remembers where the sprites were in the last two
-  frames and tells the processor exactly which background pixels have to be put back; the processor copies those few
+- **The DSP tidies up.**  Rather than clear the screen, the DSP remembers where the sprites were in the last three
+  pictures and tells the processor exactly which background pixels have to be put back; the processor copies those few
   from the background image.
 - **The DSP makes the sound.**  The game's own music driver still runs on the processor, and what it would have
   written to the X68000's YM2151 sound chip is passed to the DSP, which imitates that chip and mixes the music with
   the game's sound effects.
 - **Sharing the frame.**  Drawing happens in the screen's interrupt and gives way part of the way down the picture,
   so the game gets the rest of the frame for itself; it carries on in the time the game spends waiting for the next
-  frame.  The processor and the DSP work side by side wherever they can, so neither has to wait for the other.
+  frame.  The processor and the DSP work side by side wherever they can, so neither has to wait for the other.  There
+  are three screens, so the next picture is drawn while a finished one waits to be shown.
 
 When a frame's drawing does not fit, the finished picture is simply shown a frame later.  The game's own logic is
 never slowed down for it.

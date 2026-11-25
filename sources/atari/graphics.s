@@ -26,7 +26,7 @@ TOTAL_NUMBER_OF_CHARACTERS=128 ; 4096 / (4 * 8) = 128
 SPRITE_THROTTLE_DISPLAY_LINES=170 ; 240*3/4 = 180
 REDRAW_VBLS=4 ; A picture of an unchanged sprite list at most this often.
 PICTURE_VBLS_MAX=4 ; The slowest picture cadence finish_picture settles on, in VBLs.
-PICTURE_EARLY=8 ; Pictures in a row that are ready a VBL early before a cadence of 2 VBLs gets faster (a quarter of them at 3, an eighth at 4).
+PICTURE_EARLY=2 ; Pictures in a row that are ready a VBL early before a cadence of 2 VBLs gets faster (at 3 or 4, the first one).
 SPRITE_GROUP=4 ; Sprites draw_sprites draws between its throttle checks (a power of 2).
 MASK_HASH_SIZE=4096 ; Hash table for finding equal sprite masks.
 
@@ -45,10 +45,12 @@ initialize_graphics:
 
 	move.l	d0,physbase
 
-	; Allocate screen buffers (16 bytes boundary, ST-RAM only).
+	; Allocate screen buffers (16 bytes boundary, ST-RAM only): three, so
+	; that the next picture can be drawn while a finished one waits for its
+	; VBL (see finish_picture).
 
 	move	#0,-(sp)
-	move.l	#SCREEN_BUFFER_SIZE*2+16,-(sp)
+	move.l	#SCREEN_BUFFER_SIZE*3+16,-(sp)
 	move	#68,-(sp)
 	trap	#1
 	addq.l	#8,sp
@@ -67,6 +69,9 @@ initialize_graphics:
 	move.l	d0,display_screen_address
 	add.l	#SCREEN_BUFFER_SIZE,d0
 	move.l	d0,work_screen_address
+	add.l	#SCREEN_BUFFER_SIZE,d0
+	move.l	d0,spare_screen_address
+	sub.l	#SCREEN_BUFFER_SIZE,d0
 
 	add.l	#SCREEN_DISPLAY_OFFSET,d0
 	move.l	d0,display_window_address
@@ -204,6 +209,21 @@ initialize_graphics:
 	add.l	#256*2*2,a1
 
 	dbf		d7,.copy_loop2
+
+	; The third screen: as the work screen.
+
+	move.l	work_screen_address,a0
+	move.l	spare_screen_address,a1
+	move.l	#SCREEN_BUFFER_SIZE/16-1,d7
+
+.copy_loop3:
+	move.l	(a0)+,(a1)+
+	move.l	(a0)+,(a1)+
+	move.l	(a0)+,(a1)+
+	move.l	(a0)+,(a1)+
+
+	subq.l	#1,d7
+	bpl.s	.copy_loop3
 
 	; Build color translation table.
 
@@ -1705,15 +1725,10 @@ translate_palettes:
 
 ; ------------------------------------------------------------------------------
 
+; The first stage that draws. The work screen is never the one on display
+; (see finish_picture).
+
 clear_text:
-	tst.b	flip_pending ; The first stage that draws: the work screen is
-	beq.s	.draw ; still on display until the VBL handler has set the
-	; last flip's address.
-	move.l	#clear_text,next_graphics_routine
-
-	rts
-
-.draw:
 	movem.l	d0-a6,-(sp)
 
 	lea		text_restores,a3
@@ -2310,10 +2325,26 @@ draw_text:
 ; it at its VBL (show_held_picture), and PICTURE_EARLY of them in a row make
 ; the cadence faster again.
 ;
+; Three screens: the picture is queued (flip_pending until the VBL shows it,
+; or flip_held), and the next one is drawn into the third screen meanwhile
+; (rotate_screens). A picture that is finished while another one is queued
+; waits here for that one's VBL: only then is the screen it leaves free.
+;
 ; No VBL in between: renderer_vbls must not change here, and the VBL handler
-; reads flip_screen's address.
+; reads show_picture's address.
 
 finish_picture:
+	tst.b	flip_pending ; The queued picture is not on display yet.
+	bne.s	.queue_busy
+	tst.b	flip_held
+	beq.s	.queue_free
+
+.queue_busy:
+	move.l	#finish_picture,next_graphics_routine
+
+	rts
+
+.queue_free:
 	move.l	d0,-(sp)
 	move	sr,-(sp)
 	ori		#$0700,sr
@@ -2324,7 +2355,9 @@ finish_picture:
 	bpl.s	.not_early
 
 	; The slower the cadence, the fewer early pictures it takes (a quarter
-	; of them at 3 VBLs, an eighth at 4), as they are further apart.
+	; of them at 3 VBLs, an eighth at 4, at least one), as they are further
+	; apart. With three screens the next picture is often ready behind the
+	; queued one, so a few are enough.
 
 	addq	#1,early_pictures
 
@@ -2356,7 +2389,7 @@ finish_picture:
 	bpl.s	.show ; Which makes this one due.
 
 .hold:
-	move.l	#held_picture,next_graphics_routine
+	bsr		rotate_screens
 	st		flip_held
 
 	move	(sp)+,sr
@@ -2381,12 +2414,12 @@ finish_picture:
 	add		picture_wait,d0
 	move	d0,show_due
 
-	bsr		flip_screen
+	bsr		rotate_screens
+	bsr		show_picture
 
 	move	(sp)+,sr
 	move.l	(sp)+,d0
 
-held_picture: ; The stage of a held picture: the VBL handler goes on.
 	rts
 
 ; Called by the VBL handler before it sets the display address: show the held
@@ -2410,7 +2443,7 @@ show_held_picture:
 
 	sf		flip_held
 
-	bsr		flip_screen
+	bsr		show_picture
 
 .wait:
 	move.l	(sp)+,d0
@@ -2420,28 +2453,40 @@ show_held_picture:
 
 ; ------------------------------------------------------------------------------
 
-flip_screen:
-	movem.l	d0-d1,-(sp)
+; The work screen's picture is drawn: it becomes the display screen, the
+; queued one, and the next picture goes into the spare screen. The screen that
+; was the display screen is still on display (or about to be) and becomes the
+; spare one: it is free once the queued picture is shown, which finish_picture
+; waits for before it rotates again.
+
+rotate_screens:
+	move.l	d0,-(sp)
 
 	move.l	work_screen_address,d0
-	move.l	display_screen_address,work_screen_address
+	move.l	spare_screen_address,work_screen_address
+	move.l	display_screen_address,spare_screen_address
 	move.l	d0,display_screen_address
 
 	move	work_background_position,d0
-	move	display_background_position,work_background_position
+	move	spare_background_position,work_background_position
+	move	display_background_position,spare_background_position
 	move	d0,display_background_position
 
 	move.l	work_text_state_address,d0
-	move.l	display_text_state_address,work_text_state_address
+	move.l	spare_text_state_address,work_text_state_address
+	move.l	display_text_state_address,spare_text_state_address
 	move.l	d0,display_text_state_address
 
-;	move.l	work_sprite_infos_address_old,d0 ; Fixme!
-;	move.l	display_sprite_infos_address_old,work_sprite_infos_address_old
-;	move.l	d0,display_sprite_infos_address_old
+	move.l	(sp)+,d0
 
-;	move.l	work_sprite_infos_address_new,d0 ; Fixme!
-;	move.l	display_sprite_infos_address_new,work_sprite_infos_address_new
-;	move.l	d0,display_sprite_infos_address_new
+	move.l	#process_sprite_infos,next_graphics_routine
+
+	rts
+
+; The display screen's picture goes to the Videl at the next VBL.
+
+show_picture:
+	movem.l	d0-d1,-(sp)
 
 	move	display_background_position,d0
 	move.l	display_screen_address,d1
@@ -2455,8 +2500,6 @@ flip_screen:
 
 	movem.l	(sp)+,d0-d1
 
-	move.l	#process_sprite_infos,next_graphics_routine
-	
 	rts
 
 ; ------------------------------------------------------------------------------
@@ -2539,29 +2582,15 @@ render_idle:
 	tst.b	runs_wait_vbl ; The restore runs wait for the next frame.
 	bne.s	.done
 
-	tst.b	flip_held ; The picture waits for its VBL (finish_picture).
-	bne.s	.done
+	; A new picture may start while the last one waits for its VBL: it
+	; goes into the third screen (see finish_picture).
 
 	cmp.l	#process_sprite_infos,next_graphics_routine
-	bne.s	.in_progress ; A picture in progress.
-
-	; A new picture may start before the VBL handler has set the last
-	; flip's address: the stages up to clear_text leave the screen alone
-	; (they send the list to the DSP, which then works on the runs during
-	; the wait), and clear_text waits for the VBL (flip_pending).
+	bne.s	.work ; A picture in progress.
 
 	move	game_list_serial,d0
 	cmp		drawn_list_serial,d0
 	beq.s	.done ; Nothing new from the game.
-
-	bra.s	.work
-
-.in_progress:
-	cmp.l	#clear_text,next_graphics_routine
-	bne.s	.work
-
-	tst.b	flip_pending ; The work screen is still the one on display
-	bne.s	.done ; until the VBL handler has set the new address.
 
 .work:
 	st		renderer_lock
@@ -2796,6 +2825,9 @@ work_text_state_address:
 display_text_state_address:
 	dc.l	text_state2
 
+spare_text_state_address:
+	dc.l	text_state3
+
 raster_stages: ; Timer B interrupts until the throttle line: 1, or 2 if doubled.
 	dc		1
 
@@ -2815,6 +2847,9 @@ display_screen_address:
 work_screen_address:
 	ds.l	1
 
+spare_screen_address: ; On display until the display screen's picture is shown.
+	ds.l	1
+
 display_window_address:
 	ds.l	1
 
@@ -2822,6 +2857,9 @@ display_background_position: ; The background line at the sprites' line 0, for e
 	ds		1 ; screen's last picture.
 
 work_background_position:
+	ds		1
+
+spare_background_position:
 	ds		1
 
 game_list_scroll: ; The CRTC's scroll register when the game finished its sprite list.
@@ -2869,7 +2907,7 @@ flip_held: ; A drawn picture waits for show_due (shown by the VBL handler).
 renderer_lock: ; The game's VSYNC wait renders (render_idle): not the VBL.
 	ds.b	1
 
-flip_pending: ; flip_screen's address is not in the Videl yet (cleared by the VBL handler).
+flip_pending: ; show_picture's address is not in the Videl yet (cleared by the VBL handler).
 	ds.b	1
 
 runs_wait_vbl: ; clear_sprites_dsp put the restore runs off to the next frame.
@@ -2942,6 +2980,10 @@ text_state1:
 	ds.l	32*2
 
 text_state2:
+	ds.b	32*32
+	ds.l	32*2
+
+text_state3:
 	ds.b	32*32
 	ds.l	32*2
 

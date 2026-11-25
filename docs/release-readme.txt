@@ -14,8 +14,8 @@ What you need
 -------------
 
 A Falcon030 with 14 MB of RAM, and an RGB monitor or a TV (50 Hz) or a VGA monitor (60 Hz).  The picture is
-256 x 240 either way.  4 MB is not enough: of the memory the game needs, about 4.6 MB has to be the Falcon's
-own ST-RAM, because the screen and the sound samples can only live there.  Fast RAM is used for the rest if
+256 x 240 either way.  4 MB is not enough: of the memory the game needs, about 5.4 MB has to be the Falcon's
+own ST-RAM, because the screens and the sound samples can only live there.  Fast RAM is used for the rest if
 the machine has any, though that has not been tried yet.
 
 A 68030 is required.  The game will not run on a 68040 or on a CT60's 68060: it uses an addressing mode and an

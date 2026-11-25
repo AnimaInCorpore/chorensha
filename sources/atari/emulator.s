@@ -50,7 +50,7 @@ vbl_handler:
 	move.b	display_window_address+1,$ffff8201.w
 	move.b	display_window_address+2,$ffff8203.w
 	move.b	display_window_address+3,$ffff820d.w
-	sf		flip_pending ; The renderer may draw into the other screen now.
+	sf		flip_pending ; The queued picture is on display (see finish_picture).
 
 	addq	#1,vbl_wait_counter
 

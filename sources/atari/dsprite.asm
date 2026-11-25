@@ -3,7 +3,8 @@
 ; opm16 kernel, opm16_*.asm, plus the sound effects from DMA playback).
 ;
 ; Some figures: 1885 sprite patterns with 1372 different masks; up to about
-; 4000 RLE values; the music takes about half the DSP at 24585 Hz.
+; 4000 RLE values, sent in lists of up to RLE_BUFFER_SIZE; the music takes
+; about half the DSP at 24585 Hz.
 ;
 ; Host protocol. A packet is a header word, then its words:
 ;   $80nnnn  n music stream words ($00rrdd register write, $80nnnn wait),
@@ -15,6 +16,10 @@
 ;            each (flip + mask index, X, Y), sent while HF2 is set; after
 ;            the header (the 68030 waits for TRDY) the words come without
 ;            polling
+; Screens: the 68030 draws into three in turn, so the mask of the pixels to
+; restore for a picture holds the sprites of the picture three before it, the
+; screen's last one: the DSP keeps three lists (swap_sprite_infos), and after
+; a picture's runs it draws the mask of the oldest (draw_masks).
 ; Scrolling: the 68030's screens hold the whole background, and the display
 ; moves over it. The mask of the pixels to restore stays in the lines of the
 ; picture that drew its sprites, the screen's last one; the offset is the
@@ -39,8 +44,8 @@
 	include	'ioequ.inc'
 	include	'opm16_tab.asm' ; BLOCK = 48 and the rate constants (24585 Hz).
 
-NUMBER_OF_PACKED_SPRITES1 equ 923 ; Masks in X memory; the others go to Y.
-NUMBER_OF_PACKED_SPRITES2 equ 462
+NUMBER_OF_PACKED_SPRITES1 equ 830 ; Masks in X memory; the others go to Y.
+NUMBER_OF_PACKED_SPRITES2 equ 555
 RLE_RESTORE_WIDTH equ 16+256+16
 RLE_LONG_EVEN_BIAS equ RLE_RESTORE_WIDTH+4 ; Odd-run block plus its preceding BRA.W.
 RLE_LINE_BYTES equ 512*2 ; One screen line, including the part right of the restore area.
@@ -132,12 +137,14 @@ PITCH equ OPR+104
 ENV equ PITCH+256
 sprite_infos1 equ ENV+512 ; 2 words a sprite: flip + mask index, Y << 12 | X.
 sprite_infos2 equ sprite_infos1+2*MAX_SPRITES
-packed_sprite_masks1 equ sprite_infos2+2*MAX_SPRITES ; Up to X:$7FFF.
+sprite_infos3 equ sprite_infos2+2*MAX_SPRITES
+packed_sprite_masks1 equ sprite_infos3+2*MAX_SPRITES ; Up to X:$7FFF.
 
 ; Y external, above the code
 ssi_ring equ $4c00 ; Modulo SSI_RING_SIZE with r6.
 rle_buffer equ ssi_ring+SSI_RING_SIZE ; Needs to be in front of the screen buffer!
-screen_buffer equ rle_buffer+4000
+RLE_BUFFER_SIZE equ 2976 ; What the masks in Y leave: longer lists of runs are split (rle_full).
+screen_buffer equ rle_buffer+RLE_BUFFER_SIZE
 packed_sprite_masks2 equ screen_buffer+(16+256+16)*(16+256+16)/8/3 ; Up to Y:$7FFF.
 
 	include	'opm16_vars.asm'
@@ -1319,16 +1326,23 @@ fill_screen_buffer:
 
 ; -----------------------------------------------------------------------------
 
+; After a picture's runs: its list (work) is kept for two more pictures, and the
+; oldest list becomes work, for draw_masks and then the next list.
+
 swap_sprite_infos:
 	move	x:<work_sprite_infos,x0
 	move	x:<display_sprite_infos,x1
+	move	x:<older_sprite_infos,y0
 	move	x0,x:<display_sprite_infos
-	move	x1,x:<work_sprite_infos
+	move	x1,x:<older_sprite_infos
+	move	y0,x:<work_sprite_infos
 
 	move	x:<number_of_work_sprite_infos,x0
 	move	x:<number_of_display_sprite_infos,x1
+	move	x:<number_of_older_sprite_infos,y0
 	move	x0,x:<number_of_display_sprite_infos
-	move	x1,x:<number_of_work_sprite_infos
+	move	x1,x:<number_of_older_sprite_infos
+	move	y0,x:<number_of_work_sprite_infos
 
 	rts
 
@@ -1342,7 +1356,7 @@ swap_sprite_infos:
 ; A packet that arrives while the DSP draws the masks (music_poll) or
 ; renders a block there: music for the FIFO, or the next sprite list, which
 ; goes into rle_buffer, as the list buffers hold the list draw_masks draws
-; and the one before. Keeps r0 only: at its polls draw_masks needs no other
+; and the two after it. Keeps r0 only: at its polls draw_masks needs no other
 ; register (a is saved by music_poll), and music_poll_work saves them all.
 ; Sprite lists come only then (HF2 is set for draw_masks).
 
@@ -1490,6 +1504,14 @@ number_of_work_sprite_infos:
 	dc		0
 
 number_of_display_sprite_infos:
+	dc		0
+
+	org	x:$3a ; Behind poll_save.
+
+older_sprite_infos:
+	dc		sprite_infos3
+
+number_of_older_sprite_infos:
 	dc		0
 
 	org	x:rle_states ; Modulo 2 with r3.
