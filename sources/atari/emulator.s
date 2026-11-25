@@ -179,7 +179,7 @@ joypad_handler:
 ; ------------------------------------------------------------------------------
 
 timer_b_handler:
-	subq	#1,raster_stages_left ; Another SPRITE_THROTTLE_DISPLAY_LINES events.
+	subq	#1,raster_stages_left ; Another throttle_lines events (graphics.s).
 	addq	#1,raster_interrupts
 
 	rte

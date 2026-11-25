@@ -23,7 +23,10 @@ SCREEN_BUFFER_SIZE=(16+512+256+16)*256*2*2
 SCREEN_DISPLAY_OFFSET=16*2+16*256*2*2
 TOTAL_NUMBER_OF_SPRITES=1885
 TOTAL_NUMBER_OF_CHARACTERS=128 ; 4096 / (4 * 8) = 128
-SPRITE_THROTTLE_DISPLAY_LINES=170 ; 240*3/4 = 180
+SPRITE_THROTTLE_DISPLAY_LINES=170 ; 240*3/4 = 180; the most the throttle line goes down to (throttle_lines).
+THROTTLE_LINES_MIN=40 ; The throttle line when the game needs the frame for itself.
+THROTTLE_LINES_DOWN=40 ; Lines the throttle line moves up the picture after a frame the game did not finish in time,
+THROTTLE_LINES_UP=1 ; and down after one it finished.
 REDRAW_VBLS=4 ; A picture of an unchanged sprite list at most this often.
 LIST_SLOTS=4 ; Sprite lists kept, so that a picture can draw the one that belongs to its VBL.
 PICTURE_LATENCY=2 ; From the VBL a sprite list is finished in to the VBL that shows its picture.
@@ -2034,7 +2037,7 @@ clear_sprites_dsp:
 	; frame, as the runs must not hold the VBL off.
 
 	addq	#1,d3
-	mulu	#SPRITE_THROTTLE_DISPLAY_LINES,d3
+	mulu	throttle_lines,d3
 	sub		d1,d3 ; Events since the VBL.
 	move	frame_events,d2
 	sub		d3,d2
@@ -2044,7 +2047,7 @@ clear_sprites_dsp:
 
 .before_throttle:
 	subq	#1,d2
-	mulu	#SPRITE_THROTTLE_DISPLAY_LINES,d2
+	mulu	throttle_lines,d2
 	add		d1,d2
 
 .events_left:
@@ -2728,6 +2731,8 @@ graphics_engine:
 ; game waits for that anyway.
 
 render_idle:
+	st		game_waited ; The game finished its frame (restart_raster_throttle).
+
 	move.l	d0,-(sp)
 
 	tst.b	runs_wait_vbl ; The restore runs wait for the next frame.
@@ -2764,9 +2769,10 @@ render_idle:
 ; ------------------------------------------------------------------------------
 ;
 ; Called by the VBL handler. The graphics stages yield once the display has
-; reached SPRITE_THROTTLE_DISPLAY_LINES, so that the game keeps the rest of the
-; frame. Timer B counts these lines in event count mode and interrupts every
-; SPRITE_THROTTLE_DISPLAY_LINES events; the handler decrements
+; reached throttle_lines (at most SPRITE_THROTTLE_DISPLAY_LINES, fewer while the
+; game needs more of the frame), so that the game keeps the rest of the frame.
+; Timer B counts these lines in event count mode and interrupts every
+; throttle_lines events; the handler decrements
 ; raster_stages_left, and the stages yield when it is no longer positive.
 ;
 ; A line-doubled VGA mode shows each line twice, so Timer B may count two events
@@ -2783,8 +2789,8 @@ restart_raster_throttle:
 
 	move	raster_interrupts,d0 ; Timer B interrupts in the last frame.
 	clr		raster_interrupts
-	mulu	#SPRITE_THROTTLE_DISPLAY_LINES,d0
-	add		#SPRITE_THROTTLE_DISPLAY_LINES,d0
+	mulu	throttle_lines,d0
+	add		throttle_lines,d0
 	moveq	#0,d1
 	move.b	$fffffa21.w,d1
 	sub		d1,d0 ; Timer B events in the last frame.
@@ -2805,11 +2811,41 @@ restart_raster_throttle:
 	move	d0,frame_events
 
 .restart:
+	; The game comes first: if it did not reach its VSYNC wait in the last
+	; frame (render_idle), its logic needed more than the frame left it,
+	; and it would skip a step. Then the stages give way higher up the
+	; picture, and go back down slowly while the game keeps up. In the busy
+	; opening of the attract demo the game skipped up to a third of its
+	; steps with the line at 170 (more on VGA, whose frame is shorter).
+
+	move	throttle_lines,d0
+	tst.b	game_waited
+	bne.s	.game_kept_up
+
+	sub		#THROTTLE_LINES_DOWN,d0
+	cmp		#THROTTLE_LINES_MIN,d0
+	bge.s	.throttle_set
+
+	moveq	#THROTTLE_LINES_MIN,d0
+
+	bra.s	.throttle_set
+
+.game_kept_up:
+	addq	#THROTTLE_LINES_UP,d0
+	cmp		#SPRITE_THROTTLE_DISPLAY_LINES,d0
+	ble.s	.throttle_set
+
+	move	#SPRITE_THROTTLE_DISPLAY_LINES,d0
+
+.throttle_set:
+	move	d0,throttle_lines
+	sf		game_waited
+
 	sf		runs_wait_vbl ; The deferred restore runs may go now.
 	move	raster_stages,raster_stages_left
 
 	clr.b	$fffffa1b.w
-	move.b	#SPRITE_THROTTLE_DISPLAY_LINES,$fffffa21.w
+	move.b	d0,$fffffa21.w
 	move.b	#8,$fffffa1b.w
 
 	movem.l	(sp)+,d0-d1
@@ -2966,6 +3002,9 @@ spare_text_state_address:
 raster_stages: ; Timer B interrupts until the throttle line: 1, or 2 if doubled.
 	dc		1
 
+throttle_lines: ; Timer B events a stage (display lines, or half lines if doubled).
+	dc		SPRITE_THROTTLE_DISPLAY_LINES
+
 ; ------------------------------------------------------------------------------
 	bss
 ; ------------------------------------------------------------------------------
@@ -3024,6 +3063,9 @@ picture_due: ; The VBL that shows it.
 
 queued_due: ; The VBL that shows the held picture (show_held_picture).
 	ds		1
+
+game_waited: ; The game reached its VSYNC wait since the last VBL (render_idle).
+	ds.b	1
 
 renderer_waiting: ; The renderer waited for a list before the faster cadence's came.
 	ds.b	1
