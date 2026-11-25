@@ -1878,6 +1878,10 @@ translate_palettes:
 
 ; The first stage that draws. The work screen is never the one on display
 ; (see finish_picture).
+;
+; A character is taken away by restoring its whole cell from the background:
+; four longs a line cost less than the runs of its own pixels (about half).
+; The sprites are drawn after this, and the restore runs leave them alone.
 
 clear_text:
 	movem.l	d0-a6,-(sp)
@@ -1887,29 +1891,20 @@ clear_text:
 	bra		.start
 
 .loop:
-	move.l	d0,a2
-	move.l	(a3)+,a1
-	move.l	(a3)+,a0
-	
-	bra		.jump
-	
-.sprite_loop:
-	add		d0,a1
-	add		d0,a2
-	
-	move	(a0)+,d0
-	jmp		.jump(pc,d0.w)
+	move.l	d0,a2 ; The cell on the screen,
+	move.l	(a3)+,a1 ; and in the background.
 
-	rept 16
+	rept 8
 
-	move	(a1)+,(a2)+
-	
+	move.l	(a1)+,(a2)+
+	move.l	(a1)+,(a2)+
+	move.l	(a1)+,(a2)+
+	move.l	(a1)+,(a2)+
+	lea		256*2*2-8*2(a1),a1
+	lea		256*2*2-8*2(a2),a2
+
 	endr
 
-.jump:
-	move	(a0)+,d0
-	bpl		.sprite_loop
-	
 .start:
 	tst		raster_stages_left
 	bgt		.start2
@@ -2182,7 +2177,7 @@ prepare_text:
 	; offset is the cell), d4/d5 the shown/wanted character, d6 the cell,
 	; d7 its screen address. a2 and a4 the draw and restore lists; the
 	; font goes through TEXT_GRAPHICS_ADDRESS: per character its drawing
-	; code and its restore data.
+	; code (clear_text restores whole cells).
 
 	lea		text_bitmaps+32*4,a0 ; The cells with a character, per line.
 	lea		text_matrix,a1
@@ -2257,7 +2252,6 @@ prepare_text:
 	move.l	d7,(a4)+ ; Restore the old one.
 	move.l	text_background_offset,(a4)
 	add.l	d7,(a4)+
-	move.l	([TEXT_GRAPHICS_ADDRESS],d4.w,4),(a4)+
 
 .changed_draw:
 	lsl		#5,d5
@@ -2324,7 +2318,6 @@ prepare_text:
 	move.l	d1,(a4)+ ; Restore it where it was.
 	add.l	text_background_offset,d1
 	move.l	d1,(a4)+
-	move.l	([TEXT_GRAPHICS_ADDRESS],d4.w,4),(a4)+
 
 .moved_draw:
 	lsl		#5,d5
@@ -3175,8 +3168,8 @@ text_cover: ; Behind text_bitmaps: per text line, the cells this picture's sprit
 text_matrix:
 	ds.b	32*32
 
-text_restores: ; The characters this picture restores (prepare_text): one entry a cell.
-	ds.l	32*32*3+1 ; screen_address, background_address, restore data
+text_restores: ; The cells this picture restores (prepare_text): one entry a cell.
+	ds.l	32*32*2+1 ; screen_address, background_address
 
 text_draws: ; The characters this picture draws (prepare_text): one entry a cell.
 	ds.l	32*32*2+1 ; screen_address, drawing code
