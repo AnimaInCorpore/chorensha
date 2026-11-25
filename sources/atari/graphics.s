@@ -25,8 +25,10 @@ TOTAL_NUMBER_OF_SPRITES=1885
 TOTAL_NUMBER_OF_CHARACTERS=128 ; 4096 / (4 * 8) = 128
 SPRITE_THROTTLE_DISPLAY_LINES=170 ; 240*3/4 = 180
 REDRAW_VBLS=4 ; A picture of an unchanged sprite list at most this often.
+LIST_SLOTS=4 ; Sprite lists kept, so that a picture can draw the one that belongs to its VBL.
+PICTURE_LATENCY=2 ; From the VBL a sprite list is finished in to the VBL that shows its picture.
 PICTURE_VBLS_MAX=4 ; The slowest picture cadence finish_picture settles on, in VBLs.
-PICTURE_EARLY=8 ; Pictures in a row that are ready a VBL early before a cadence of 2 VBLs gets faster (a quarter of them at 3, an eighth at 4).
+PICTURE_EARLY=4 ; Pictures in a row that are ready a VBL early before a cadence of 2 VBLs gets faster (a quarter of them at 3, an eighth at 4, at least one).
 SPRITE_GROUP=4 ; Sprites draw_sprites draws between its throttle checks (a power of 2).
 MASK_HASH_SIZE=4096 ; Hash table for finding equal sprite masks.
 
@@ -1216,11 +1218,48 @@ prepare_sprite_infos:
 	lea		SPRITE_DATA_TABLE,a0
 	move.l	CURRENT_SPRITE_DATA_ENTRY,d7
 	sub.l	a0,d7
-	beq		.skip_all
+	beq		.no_sprites
 
 	move.l	d7,(sp) ; Return number of prepared sprites.
 
-	move.l	work_sprite_infos_address,a3
+	; The slot for this list: an empty one, else the one with the oldest
+	; list. A picture reads its list in one go (process_sprite_infos, in
+	; the VBL handler or the game's VSYNC wait), so it never reads this one
+	; while it is written here: it is not ready meanwhile.
+
+	lea		list_ready,a1
+	lea		list_vbls,a2
+	moveq	#0,d0 ; The slot.
+	moveq	#-1,d3 ; Its list's age in VBLs.
+	moveq	#0,d1
+
+.slot:
+	tst.b	(a1,d1.w)
+	beq.s	.empty_slot
+
+	move	renderer_vbls,d2
+	sub		(a2,d1.w*2),d2
+	cmp		d3,d2
+	ble.s	.next_slot
+
+	move	d2,d3
+	move	d1,d0
+
+.next_slot:
+	addq	#1,d1
+	cmp		#LIST_SLOTS,d1
+	bne.s	.slot
+
+	bra.s	.slot_chosen
+
+.empty_slot:
+	move	d1,d0
+
+.slot_chosen:
+	sf		(a1,d0.w) ; Not ready while it is written.
+	move	d0,list_writing
+	lea		list_addresses,a3
+	move.l	(a3,d0.w*4),a3
 
 	lsr		#3,d7
 	move	d7,(a3)+
@@ -1294,12 +1333,20 @@ prepare_sprite_infos:
 	dbf		d7,.reorder_loop
 	
 .skip_all:
-	move.l	work_sprite_infos_address,d0
-	move.l	display_sprite_infos_address,work_sprite_infos_address
-	move.l	d0,display_sprite_infos_address
-	move	L_00E80000+$22,game_list_scroll ; The CRTC's Y scroll of the slow graphic layer.
+	; The list is ready, with the VBL it belongs to and the CRTC's Y
+	; scroll of the slow graphic layer. A frame without sprites leaves the
+	; lists as they are.
+
+	move	list_writing,d0
+	lea		list_vbls,a0
+	move	renderer_vbls,(a0,d0.w*2)
+	lea		list_scrolls,a0
+	move	L_00E80000+$22,(a0,d0.w*2)
+	lea		list_ready,a0
+	st		(a0,d0.w)
 	addq	#1,game_list_serial ; A new list for render_idle.
-	
+
+.no_sprites:
 	movem.l	(sp)+,d0-a6
 
 	move.l	#SPRITE_DATA_TABLE,CURRENT_SPRITE_DATA_ENTRY
@@ -1313,22 +1360,133 @@ prepare_sprite_infos:
 process_sprite_infos:
 	movem.l	d0-a6,-(sp)
 
-	; A picture of a new sprite list from the game; the same list again only
-	; after a few VBLs (for the text layer, in case the game stops sending
-	; sprites). Meanwhile the game gets the time: its VBL routine runs once
-	; the renderer returns.
+	; The picture's list. A picture is shown PICTURE_LATENCY VBLs after the
+	; VBL its list was finished in, so the sprites and the background move
+	; on screen by as many game steps as VBLs have passed. The list wanted
+	; is the one a cadence after the last picture's (every second list at a
+	; cadence of 2 VBLs); if the game skipped that VBL, the next one. A list
+	; that can no longer be shown in time is passed over for the newest,
+	; and the cadence gets slower, as for a late picture (finish_picture).
+	; If there is none from the wanted VBL on, the newest again only after a
+	; few VBLs (for the text layer, in case the game stops sending sprites).
+	; Meanwhile the game gets the time: its VBL routine runs once the
+	; renderer returns.
 
-	move	game_list_serial,d0
-	cmp		drawn_list_serial,d0
-	bne.s	.new
+	move	last_list_vbl,d5
+	add		picture_wait,d5
+	addq	#1,d5 ; The VBL of the list wanted.
 
+	lea		list_ready,a1
+	lea		list_vbls,a2
+	moveq	#-1,d6 ; The first ready list from the wanted VBL on,
+	move	#$7fff,d4 ; VBLs after it;
+	moveq	#-1,d3 ; the newest list,
+	move	#$7fff,d2 ; its age in VBLs.
+	moveq	#LIST_SLOTS-1,d1
+
+.find:
+	tst.b	(a1,d1.w)
+	beq.s	.find_next
+
+	move	(a2,d1.w*2),d0
+	sub		d5,d0
+	bmi.s	.newest
+
+	cmp		d4,d0
+	bge.s	.newest
+
+	move	d0,d4
+	move	d1,d6
+
+.newest:
+	move	renderer_vbls,d0
+	sub		(a2,d1.w*2),d0
+	cmp		d2,d0
+	bge.s	.find_next
+
+	move	d0,d2
+	move	d1,d3
+
+.find_next:
+	dbf		d1,.find
+
+	tst		d3
+	bmi		.not_now ; No list yet.
+
+	tst		d6
+	bpl.s	.wanted
+
+	; Waiting for the wanted list. If the renderer waits already before
+	; the list a faster cadence would take comes, and still when it is
+	; there, it has time to spare (see finish_picture).
+
+	tst		picture_wait
+	beq.s	.no_spare
+
+	move	(a2,d3.w*2),d0
+	sub		last_list_vbl,d0
+	cmp		picture_wait,d0
+	bge.s	.faster_list
+
+	st		renderer_waiting ; Before the faster cadence's list.
+
+	bra.s	.no_spare
+
+.faster_list:
+	tst.b	renderer_waiting
+	beq.s	.no_spare
+
+	st		list_waited
+
+.no_spare:
 	move	renderer_vbls,d0
 	sub		drawn_list_vbl,d0
 	cmp		#REDRAW_VBLS,d0
 	bcs		.not_now
 
-.new:
-	move.l	display_sprite_infos_address,a0
+	move	d3,d6 ; The newest again.
+
+	bra.s	.take
+
+.wanted:
+	move	(a2,d6.w*2),d0
+	add		#PICTURE_LATENCY,d0
+	sub		renderer_vbls,d0
+	subq	#1,d0 ; Its VBL less the next one.
+	bpl.s	.take
+
+	move	d3,d6 ; Too late: the newest.
+	clr		early_pictures
+
+	cmp		#PICTURE_VBLS_MAX-1,picture_wait
+	bcc.s	.take
+
+	addq	#1,picture_wait
+
+.take:
+	lea		list_addresses,a0
+	move.l	(a0,d6.w*4),a0
+	move.l	a0,picture_list
+	move	(a2,d6.w*2),d0
+	move	d0,last_list_vbl
+	lea		list_scrolls,a1
+	move	(a1,d6.w*2),picture_scroll
+
+	; Due PICTURE_LATENCY VBLs after its list, but not before the next VBL:
+	; an old list (the newest again, or the game had none for a while) is
+	; due as if it had just come.
+
+	add		#PICTURE_LATENCY,d0
+	move	renderer_vbls,d1
+	addq	#1,d1
+	cmp		d1,d0
+	bpl.s	.due_set
+
+	move	renderer_vbls,d0
+	add		#PICTURE_LATENCY,d0
+
+.due_set:
+	move	d0,picture_due
 
 	clr.l	d7
 	move	(a0)+,d7
@@ -1341,19 +1499,9 @@ process_sprite_infos:
 .start:
 	move	game_list_serial,drawn_list_serial
 	move	renderer_vbls,drawn_list_vbl
-
-	; A picture that starts late (the game had no list) is not behind the
-	; cadence: it is due at the next VBL (see finish_picture).
-
-	move	renderer_vbls,d0
-	sub		show_due,d0
-	bmi.s	.cadence_set
-
-	move	renderer_vbls,d0
-	addq	#1,d0
-	move	d0,show_due
-
-.cadence_set:
+	move.b	list_waited,picture_spare
+	sf		list_waited
+	sf		renderer_waiting
 
 	; Scrolling. Each screen holds the whole background (512 lines and
 	; the first 256 again), and the display moves over it: the picture's
@@ -1362,7 +1510,7 @@ process_sprite_infos:
 	; restore runs and the old text are taken away there, and the DSP gets
 	; the lines the display has moved since (see dsprite.asm).
 
-	move	game_list_scroll,d0 ; The X68000 shows line (y + scroll) & 511.
+	move	picture_scroll,d0 ; The X68000 shows line (y + scroll) & 511.
 	and		#$1ff,d0
 	move	work_background_position,d1 ; Of the work screen's last picture.
 	move	d0,work_background_position
@@ -1525,7 +1673,7 @@ process_sprite_infos:
 
 	move	(sp)+,sr ; The transfer is over: the VBL may come again.
 
-	move.l	display_sprite_infos_address,a0
+	move.l	picture_list,a0
 	addq.l	#2,a0
 
 	; The drawing entry of each sprite (see convert_sprite_to_drawing_code):
@@ -2312,18 +2460,17 @@ draw_text:
 
 ; ------------------------------------------------------------------------------
 ;
-; The picture is drawn: show it, at a steady cadence. A picture takes the game's
-; latest sprite list when it starts, so the motion on the display is even only
-; if the pictures follow each other at the same distance. Without a cadence, a
-; picture that takes about a frame is shown after one VBL or after two, as it
-; happens to end before a VBL or behind it, and the sprites and the scrolling
-; then move by 0, 1 or 2 game steps a VBL in turns.
+; The picture is drawn: show it at its VBL, picture_due, PICTURE_LATENCY VBLs
+; after the VBL its list was finished in (process_sprite_infos). So the sprites
+; and the scrolling move on the display by as many game steps as VBLs have
+; passed, and evenly if the pictures also follow each other at the same
+; distance: picture_wait + 1 is that cadence in VBLs, the distance between the
+; lists the pictures take.
 ;
-; picture_wait + 1 is the cadence in VBLs, and show_due the VBL that shows the
-; next picture. A picture that is late for it makes the cadence slower by one
-; VBL. One that is ready early is held (flip_held) until the VBL handler shows
-; it at its VBL (show_held_picture), and PICTURE_EARLY of them in a row make
-; the cadence faster again.
+; A picture that is late for its VBL is shown at the next one and makes the
+; cadence slower by one VBL. One that is ready early is held (flip_held) until
+; the VBL handler shows it at its VBL (show_held_picture), and PICTURE_EARLY of
+; them in a row make the cadence faster again, from the next list on.
 ;
 ; Three screens: the picture is queued (flip_pending until the VBL shows it,
 ; or flip_held), and the next one is drawn into the third screen meanwhile
@@ -2351,13 +2498,37 @@ finish_picture:
 
 	move	renderer_vbls,d0
 	addq	#1,d0 ; The VBL that would show the picture.
-	sub		show_due,d0
-	bpl.s	.not_early
+	sub		picture_due,d0
+	bmi.s	.early
+	bne.s	.late
 
+	; In time. At a slower cadence the picture's list comes about when the
+	; last picture is shown, so it is seldom early: that the renderer
+	; waited while the list for a faster cadence was there counts as early
+	; too (process_sprite_infos).
+
+	tst.b	picture_spare
+	bne.s	.early
+
+	clr		early_pictures
+
+	bra.s	.show
+
+.late:
+	clr		early_pictures
+
+	cmp		#PICTURE_VBLS_MAX-1,picture_wait
+	bcc.s	.show
+
+	addq	#1,picture_wait ; Late: slower by one VBL.
+
+	bra.s	.show
+
+.early:
 	; The slower the cadence, the fewer early pictures it takes (a quarter
-	; of them at 3 VBLs, an eighth at 4), as they are further apart. Fewer
-	; than 8 at 2 VBLs bring back single 2-VBL gaps in full-rate motion,
-	; which make the bullets' paths uneven.
+	; of them at 3 VBLs, an eighth at 4), as they are further apart. The
+	; pictures keep to their lists' VBLs, so a faster cadence changes how
+	; often the display moves, not how far it moves in a VBL.
 
 	addq	#1,early_pictures
 
@@ -2376,19 +2547,20 @@ finish_picture:
 	cmp		#PICTURE_EARLY,early_pictures
 
 .counted:
-	bcs.s	.hold
+	bcs.s	.counted_done
 
 	clr		early_pictures
 
 	tst		picture_wait
-	beq.s	.hold
+	beq.s	.counted_done
 
-	subq	#1,picture_wait ; Faster by one VBL.
-	subq	#1,show_due
-	addq	#1,d0
-	bpl.s	.show ; Which makes this one due.
+	subq	#1,picture_wait ; Faster by one VBL, from the next list on.
 
-.hold:
+.counted_done:
+	tst		d0
+	bpl.s	.show ; In time.
+
+	move	picture_due,queued_due
 	bsr		rotate_screens
 	st		flip_held
 
@@ -2397,23 +2569,7 @@ finish_picture:
 
 	rts
 
-.not_early:
-	clr		early_pictures
-
-	tst		d0
-	beq.s	.show ; In time.
-
-	cmp		#PICTURE_VBLS_MAX-1,picture_wait
-	bcc.s	.show
-
-	addq	#1,picture_wait ; Late: slower by one VBL.
-
 .show:
-	move	renderer_vbls,d0
-	addq	#2,d0
-	add		picture_wait,d0
-	move	d0,show_due
-
 	bsr		rotate_screens
 	bsr		show_picture
 
@@ -2433,13 +2589,8 @@ show_held_picture:
 
 	move	renderer_vbls,d0
 	addq	#1,d0 ; This VBL (restart_raster_throttle counts it later).
-	sub		show_due,d0
+	sub		queued_due,d0
 	bmi.s	.wait
-
-	move	renderer_vbls,d0
-	addq	#2,d0
-	add		picture_wait,d0
-	move	d0,show_due
 
 	sf		flip_held
 
@@ -2630,19 +2781,6 @@ restart_raster_throttle:
 
 	addq	#1,renderer_vbls
 
-	; Between pictures show_due follows the VBLs, so that it never falls
-	; far behind (the comparisons with it are signed).
-
-	cmp.l	#process_sprite_infos,next_graphics_routine
-	bne.s	.cadence_ok
-
-	move	renderer_vbls,d0
-	sub		show_due,d0
-	ble.s	.cadence_ok
-
-	move	renderer_vbls,show_due
-
-.cadence_ok:
 	move	raster_interrupts,d0 ; Timer B interrupts in the last frame.
 	clr		raster_interrupts
 	mulu	#SPRITE_THROTTLE_DISPLAY_LINES,d0
@@ -2810,11 +2948,8 @@ free_compiled_objects_address:
 next_sprite_infos_address:
 	dc.l	sprite_infos3
 
-display_sprite_infos_address:
-	dc.l	emulated_sprite_infos1
-
-work_sprite_infos_address:
-	dc.l	emulated_sprite_infos2
+list_addresses: ; The sorted sprite lists (prepare_sprite_infos): count, then x, y, pattern, info.
+	dc.l	emulated_sprite_infos1,emulated_sprite_infos2,emulated_sprite_infos3,emulated_sprite_infos4
 
 next_text_infos_address: ; Where clear_text or draw_text goes on.
 	dc.l	text_restores
@@ -2862,8 +2997,43 @@ work_background_position:
 spare_background_position:
 	ds		1
 
-game_list_scroll: ; The CRTC's scroll register when the game finished its sprite list.
+list_vbls: ; renderer_vbls when the game finished the list in each slot.
+	ds		LIST_SLOTS
+
+list_scrolls: ; The CRTC's scroll register then.
+	ds		LIST_SLOTS
+
+list_ready: ; The slot holds a finished list.
+	ds.b	LIST_SLOTS
+	even
+
+list_writing: ; The slot prepare_sprite_infos writes.
 	ds		1
+
+picture_list: ; The list of the current or last picture (process_sprite_infos).
+	ds.l	1
+
+picture_scroll: ; Its scroll register.
+	ds		1
+
+last_list_vbl: ; Its list's VBL.
+	ds		1
+
+picture_due: ; The VBL that shows it.
+	ds		1
+
+queued_due: ; The VBL that shows the held picture (show_held_picture).
+	ds		1
+
+renderer_waiting: ; The renderer waited for a list before the faster cadence's came.
+	ds.b	1
+
+list_waited: ; And it still waited when that list was there.
+	ds.b	1
+
+picture_spare: ; That was so before the current or last picture.
+	ds.b	1
+	even
 
 dsp_scroll_offset: ; Lines the display has moved since the work screen's last picture.
 	ds		1
@@ -2892,16 +3062,13 @@ drawn_list_vbl: ; renderer_vbls when that picture began.
 renderer_vbls: ; VBLs, for the timed redraw (the game's WAIT_VBL clears vbl_wait_counter).
 	ds		1
 
-show_due: ; renderer_vbls of the VBL that shows the next picture (finish_picture).
-	ds		1
-
 picture_wait: ; The picture cadence in VBLs, less 1.
 	ds		1
 
-early_pictures: ; Pictures in a row that were ready before show_due.
+early_pictures: ; Pictures in a row that were ready before their VBL.
 	ds		1
 
-flip_held: ; A drawn picture waits for show_due (shown by the VBL handler).
+flip_held: ; A drawn picture waits for queued_due (shown by the VBL handler).
 	ds.b	1
 
 renderer_lock: ; The game's VSYNC wait renders (render_idle): not the VBL.
@@ -2949,6 +3116,12 @@ emulated_sprite_infos1:
 	ds		1+512*4
 
 emulated_sprite_infos2:
+	ds		1+512*4
+
+emulated_sprite_infos3:
+	ds		1+512*4
+
+emulated_sprite_infos4:
 	ds		1+512*4
 
 text_bitmaps:
