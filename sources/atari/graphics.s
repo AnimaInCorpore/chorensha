@@ -1621,43 +1621,56 @@ translate_palettes:
 ;.start_translating:
 	movem.l	d0-a6,-(sp)
 
-	; Only if the game's palette has changed since the last translation
-	; (the translation table is fixed after initialize_graphics).
+	; Only the palettes of 16 colours that the game has changed since the
+	; last translation (the translation table is fixed after
+	; initialize_graphics): the game changes some of them every frame, and
+	; translating all 256 colours cost about 10k cycles a picture.
 
 	lea		L_00E82000+$200,a0
 	lea		translated_palette_source,a3
-
-	tst.b	palette_translated
-	beq.s	.translate
-
-	moveq	#16*16/2/4-1,d7
-
-.compare:
-	cmpm.l	(a0)+,(a3)+
-	bne.s	.changed
-	cmpm.l	(a0)+,(a3)+
-	bne.s	.changed
-	cmpm.l	(a0)+,(a3)+
-	bne.s	.changed
-	cmpm.l	(a0)+,(a3)+
-	dbne	d7,.compare
-	beq		.unchanged
-
-.changed:
-	lea		L_00E82000+$200,a0
-	lea		translated_palette_source,a3
-
-.translate:
-	st		palette_translated
-
 	lea		color_translation_table,a1
 	lea		translated_palettes,a2
 
 	clr.l	d0
+	moveq	#16-1,d7
 
-	move	#16*16/16-1,d7
+	tst.b	palette_translated
+	beq.s	.translate ; The first time: all of them.
 
-.loop:
+	; Colour 0 is transparent: no drawing code uses it. In the attract
+	; demo the game changes colour 1 of most palettes every frame and
+	; little else, so colour 1 is translated on its own.
+
+.palette:
+	move	2(a0),d0 ; Colour 1.
+	cmp		2(a3),d0
+	beq.s	.colours_2_15
+
+	move	d0,2(a3)
+	move	(a1,d0.l*2),d1
+	move	d1,4(a2) ; Colour 1's own long, as .translate writes it,
+	move	d1,6(a2)
+	move	d1,2*4+2(a2) ; and colour 2's low word, which d0 uses (see below).
+
+.colours_2_15:
+	lea		2*2(a0),a4
+	lea		2*2(a3),a5
+	moveq	#14*2/4-1,d6
+
+.compare:
+	cmpm.l	(a4)+,(a5)+
+	dbne	d6,.compare
+	bne.s	.translate
+
+	lea		16*2(a0),a0 ; Unchanged.
+	lea		16*2(a3),a3
+	lea		16*4(a2),a2
+
+	dbf		d7,.palette
+
+	bra		.done
+
+.translate:
 	rept 16
 
 	move	(a0)+,d0
@@ -1668,21 +1681,24 @@ translate_palettes:
 
 	endr
 
-	dbf		d7,.loop
-
 	; Colour 2 holds colour 1 in its low word: the drawing code has d0
 	; for both (see convert_sprite_to_drawing_code).
 
-	lea		translated_palettes,a2
-	moveq	#16-1,d7
+	move	-16*4+4(a2),-16*4+2*4+2(a2)
 
-.colour_1:
-	move	4(a2),2*4+2(a2)
-	lea		16*4(a2),a2
+	tst.b	palette_translated
+	beq.s	.next_palette
 
-	dbf		d7,.colour_1
+	dbf		d7,.palette
 
-.unchanged:
+	bra.s	.done
+
+.next_palette:
+	dbf		d7,.translate
+
+.done:
+	st		palette_translated
+
 	movem.l	(sp)+,d0-a6
 
 	rts
@@ -1700,14 +1716,13 @@ clear_text:
 .draw:
 	movem.l	d0-a6,-(sp)
 
-	lea		text_infos,a3
-	
+	lea		text_restores,a3
+
 	bra		.start
 
 .loop:
 	move.l	d0,a2
 	move.l	(a3)+,a1
-	addq.l	#4,a3
 	move.l	(a3)+,a0
 	
 	bra		.jump
@@ -1979,36 +1994,49 @@ prepare_text:
 	movem.l	d0-a6,-(sp)
 
 	; The text work of this picture, from what the work screen shows
-	; (its text state) and what the game wants now. A cell whose character
-	; has changed gets the old one restored (clear_text, before the
-	; sprites) and the new one drawn (draw_text, after the restore runs).
-	; An unchanged cell is drawn again only if sprites touch it: those of
-	; this picture, or those of the screen's last picture, which the
-	; restore runs take away together with the character's pixels on them.
-	; All other text stays as it is on the screen.
+	; (its text state) and what the game wants now, as two lists: the
+	; characters to restore (text_restores: clear_text, before the sprites)
+	; and those to draw (text_draws: draw_text, after the restore runs). A
+	; cell whose character has changed gets the old one restored and the
+	; new one drawn. An unchanged cell is drawn again only if sprites touch
+	; it: those of this picture, or those of the screen's last picture,
+	; which the restore runs take away together with the character's pixels
+	; on them. All other text stays as it is on the screen.
 	;
 	; The text does not scroll, so when the display has moved over the
 	; screen since its last picture (text_move), every character shown is
 	; restored where it was drawn and every character wanted is drawn at
-	; its new place, as two list entries.
+	; its new place (.moved_line): while the background scrolls, that is
+	; every picture.
 	;
 	; process_sprite_infos marks the cells by the sprites' coordinates.
+	;
+	; d0 the line's cells still to do, d1 the cells sprites touch, d2 the
+	; wanted cells, d3 the shown cells (bit 31 = the left cell; bfffo's
+	; offset is the cell), d4/d5 the shown/wanted character, d6 the cell,
+	; d7 its screen address. a2 and a4 the draw and restore lists; the
+	; font goes through TEXT_GRAPHICS_ADDRESS: per character its drawing
+	; code and its restore data.
 
 	lea		text_bitmaps+32*4,a0 ; The cells with a character, per line.
 	lea		text_matrix,a1
-	move.l	TEXT_GRAPHICS_ADDRESS,a2
 	move.l	work_text_state_address,a3
 	lea		TEXT_STATE_LINES(a3),a6
-	lea		text_infos,a4
+	lea		text_restores,a4
+	lea		text_draws,a2
 	move.l	work_screen_address,a5
 	move.l	#background_image,d7
 	sub.l	a5,d7 ; From a screen address to the background's.
+	move.l	d7,text_background_offset
 	add.l	#SCREEN_DISPLAY_OFFSET,a5
 	moveq	#0,d0
 	move	work_background_position,d0
 	lsl.l	#8,d0
 	lsl.l	#2,d0
 	add.l	d0,a5
+
+	tst.l	text_move
+	bne		.moved_line
 
 .line:
 	move.l	(a0),d2 ; Wanted.
@@ -2020,128 +2048,151 @@ prepare_text:
 	move.l	(a6),d3 ; Shown.
 	move.l	d2,d0
 	or.l	d3,d0
-	beq		.skip_line
-
-	moveq	#32-1,d6 ; The cell's bit.
+	beq.s	.next_line
 
 .cell:
-	btst	d6,d0
-	beq	.next_cell
+	bfffo	d0{0:32},d6
+	bfclr	d0{d6:1}
 
 	moveq	#0,d4
-	move.b	(a3),d4 ; Shown (0: none).
+	move.b	(a3,d6.w),d4 ; Shown (0: none).
 	moveq	#0,d5
-	btst	d6,d2
-	beq	.compare
+	bftst	d2{d6:1}
+	beq.s	.compare
 
-	move.b	(a1),d5 ; Wanted.
+	move.b	(a1,d6.w),d5 ; Wanted.
 
 .compare:
-	tst.l	text_move
-	bne	.moved
+	move.l	d6,d7
+	lsl.l	#4,d7 ; 8 pixels a cell.
+	add.l	a5,d7
 
 	cmp.b	d4,d5
-	bne	.changed
+	bne.s	.changed
 
-	btst	d6,d1
-	beq	.next_cell
+	bftst	d1{d6:1}
+	beq.s	.next_cell
 
 	lsl		#5,d5
-	beq	.next_cell
+	beq.s	.next_cell
 
-	move.l	a5,(a4)+ ; Draw it again.
-	clr.l	(a4)+
-	move.l	(a2,d5.w),(a4)+
-	move.l	#text_no_restore,(a4)+
+	move.l	d7,(a2)+ ; Draw it again.
+	move.l	([TEXT_GRAPHICS_ADDRESS],d5.w),(a2)+
 
-	bra	.next_cell
-
-.moved:
-	move.b	d5,(a3)
-	bclr	d6,d3
-
-	lsl		#5,d4
-	beq.s	.moved_draw
-
-	move.l	a5,d1 ; The touched cells are not needed here.
-	add.l	text_move,d1
-	move.l	d1,(a4)+ ; Restore it where it was.
-	add.l	d7,d1
-	move.l	d1,(a4)+
-	move.l	#text_no_draw,(a4)+
-	move.l	4(a2,d4.w),(a4)+
-
-.moved_draw:
-	lsl		#5,d5
-	beq		.next_cell
-
-	bset	d6,d3
-
-	move.l	a5,(a4)+ ; Draw it here.
-	clr.l	(a4)+
-	move.l	(a2,d5.w),(a4)+
-	move.l	#text_no_restore,(a4)+
-
-	bra		.next_cell
+	bra.s	.next_cell
 
 .changed:
-	move.b	d5,(a3)
-	bclr	d6,d3
+	move.b	d5,(a3,d6.w)
+	bfclr	d3{d6:1}
 
-	move.l	a5,(a4)+
-	move.l	a5,(a4)
-	add.l	d7,(a4)+
-
-	move.l	#text_no_draw,(a4)
-	lsl		#5,d5
-	beq.s	.no_draw
-
-	bset	d6,d3
-	move.l	(a2,d5.w),(a4)
-
-.no_draw:
-	addq.l	#4,a4
-
-	move.l	#text_no_restore,(a4)
 	lsl		#5,d4
-	beq.s	.no_restore
+	beq.s	.changed_draw
 
-	move.l	4(a2,d4.w),(a4)
+	move.l	d7,(a4)+ ; Restore the old one.
+	move.l	text_background_offset,(a4)
+	add.l	d7,(a4)+
+	move.l	([TEXT_GRAPHICS_ADDRESS],d4.w,4),(a4)+
 
-.no_restore:
-	addq.l	#4,a4
+.changed_draw:
+	lsl		#5,d5
+	beq.s	.next_cell
+
+	bfset	d3{d6:1}
+
+	move.l	d7,(a2)+ ; Draw the new one.
+	move.l	([TEXT_GRAPHICS_ADDRESS],d5.w),(a2)+
 
 .next_cell:
-	addq.l	#1,a1
-	addq.l	#1,a3
-	lea		8*2(a5),a5
-
-	dbf		d6,.cell
+	tst.l	d0
+	bne.s	.cell
 
 	move.l	d3,(a6)
-	lea		256*2*2*8-256*2(a5),a5
 
-	bra.s	.next_line
-
-.skip_line:
+.next_line:
 	lea		32(a1),a1
 	lea		32(a3),a3
 	lea		256*2*2*8(a5),a5
-
-.next_line:
 	addq.l	#4,a0
 	addq.l	#8,a6
 
 	cmp.l	#text_bitmaps+2*32*4,a0
 	bne		.line
 
-	clr.l	(a4) ; End marker.
+	bra		.end
+
+.moved_line:
+	move.l	(a0),d2 ; Wanted.
+	move.l	text_cover-text_bitmaps-32*4(a0),d1
+	clr.l	text_cover-text_bitmaps-32*4(a0)
+	move.l	d1,4(a6) ; For this screen's next picture.
+	move.l	(a6),d3 ; Shown.
+	move.l	d2,d0
+	or.l	d3,d0
+	beq.s	.moved_next_line
+
+.moved_cell:
+	bfffo	d0{0:32},d6
+	bfclr	d0{d6:1}
+
+	moveq	#0,d4
+	move.b	(a3,d6.w),d4 ; Shown (0: none).
+	moveq	#0,d5
+	bftst	d2{d6:1}
+	beq.s	.moved_wanted
+
+	move.b	(a1,d6.w),d5 ; Wanted.
+
+.moved_wanted:
+	move.b	d5,(a3,d6.w)
+	bfclr	d3{d6:1}
+
+	move.l	d6,d7
+	lsl.l	#4,d7 ; 8 pixels a cell.
+	add.l	a5,d7
+
+	lsl		#5,d4
+	beq.s	.moved_draw
+
+	move.l	d7,d1 ; The touched cells are not needed here.
+	add.l	text_move,d1
+	move.l	d1,(a4)+ ; Restore it where it was.
+	add.l	text_background_offset,d1
+	move.l	d1,(a4)+
+	move.l	([TEXT_GRAPHICS_ADDRESS],d4.w,4),(a4)+
+
+.moved_draw:
+	lsl		#5,d5
+	beq.s	.moved_next_cell
+
+	bfset	d3{d6:1}
+
+	move.l	d7,(a2)+ ; Draw it here.
+	move.l	([TEXT_GRAPHICS_ADDRESS],d5.w),(a2)+
+
+.moved_next_cell:
+	tst.l	d0
+	bne.s	.moved_cell
+
+	move.l	d3,(a6)
+
+.moved_next_line:
+	lea		32(a1),a1
+	lea		32(a3),a3
+	lea		256*2*2*8(a5),a5
+	addq.l	#4,a0
+	addq.l	#8,a6
+
+	cmp.l	#text_bitmaps+2*32*4,a0
+	bne		.moved_line
+
+.end:
+	clr.l	(a4) ; End markers.
+	clr.l	(a2)
 
 	movem.l	(sp)+,d0-a6
 
 	rts
 
-text_no_draw: ; Draw routine of a list entry that only restores.
 no_sprite: ; Draw routine of an entry that fills draw_sprites' last group.
 	rts
 
@@ -2206,7 +2257,7 @@ build_cell_span:
 draw_text:
 	movem.l	d0-a6,-(sp)
 
-	lea		text_infos,a6
+	lea		text_draws,a6
 
 .colours:
 	lea		translated_palettes+2*4,a5 ; Colour 2 (see convert_sprite_to_drawing_code).
@@ -2216,10 +2267,10 @@ draw_text:
 	tst.l	(a6)
 	beq		.end
 
-	move.l	a6,-(sp)
-	jsr		([8,a6])
+	move.l	a6,-(sp) ; The entry: screen address, drawing code.
+	jsr		([4,a6])
 	move.l	(sp)+,a6
-	lea		16(a6),a6
+	addq.l	#8,a6
 
 	tst		raster_stages_left
 	bgt		.loop
@@ -2736,17 +2787,14 @@ display_sprite_infos_address:
 work_sprite_infos_address:
 	dc.l	emulated_sprite_infos2
 
-next_text_infos_address:
-	dc.l	text_infos
+next_text_infos_address: ; Where clear_text or draw_text goes on.
+	dc.l	text_restores
 
 work_text_state_address:
 	dc.l	text_state1
 	
 display_text_state_address:
 	dc.l	text_state2
-
-text_no_restore: ; Restore data of a list entry that only draws.
-	dc		-1
 
 raster_stages: ; Timer B interrupts until the throttle line: 1, or 2 if doubled.
 	dc		1
@@ -2874,8 +2922,14 @@ text_cover: ; Behind text_bitmaps: per text line, the cells this picture's sprit
 text_matrix:
 	ds.b	32*32
 
-text_infos: ; This picture's text work (prepare_text): up to two entries a cell.
-	ds.l	32*32*4*2+1 ; screen_adress, background_address, text_draw_address, text_clear_address
+text_restores: ; The characters this picture restores (prepare_text): one entry a cell.
+	ds.l	32*32*3+1 ; screen_address, background_address, restore data
+
+text_draws: ; The characters this picture draws (prepare_text): one entry a cell.
+	ds.l	32*32*2+1 ; screen_address, drawing code
+
+text_background_offset: ; From a work screen address to the background's.
+	ds.l	1
 
 ; What each screen shows of the text layer: the character of each cell (0:
 ; none), then for each text line the cells with a character and the cells the
