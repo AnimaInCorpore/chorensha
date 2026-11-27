@@ -29,6 +29,7 @@ THROTTLE_LINES_DOWN=40 ; Lines the throttle line moves up the picture after a fr
 THROTTLE_LINES_UP=1 ; and down after one it finished.
 REDRAW_VBLS=4 ; A picture of an unchanged sprite list at most this often.
 LIST_SLOTS=4 ; Sprite lists kept, so that a picture can draw the one that belongs to its VBL.
+LIST_AGE_MAX=64 ; VBLs: the age an old list that is drawn again keeps (process_sprite_infos).
 PICTURE_LATENCY=2 ; From the VBL a sprite list is finished in to the VBL that shows its picture.
 PICTURE_VBLS_MAX=4 ; The slowest picture cadence finish_picture settles on, in VBLs.
 PICTURE_EARLY=4 ; Pictures in a row that are ready a VBL early before a cadence of 2 VBLs gets faster (a quarter of them at 3, an eighth at 4, at least one).
@@ -1340,13 +1341,33 @@ prepare_sprite_infos:
 	; scroll of the slow graphic layer. A frame without sprites leaves the
 	; lists as they are.
 
+	; After a step that ran past a VBL the game may finish the next one
+	; before the following VBL: two lists of one VBL. This one is the
+	; game's state at that VBL, so the earlier one goes (a picture would
+	; pick between them by their slots).
+
 	move	list_writing,d0
+	move	renderer_vbls,d1 ; Read once: a VBL may come here.
 	lea		list_vbls,a0
-	move	renderer_vbls,(a0,d0.w*2)
+	lea		list_ready,a1
+	moveq	#LIST_SLOTS-1,d2
+
+.same_vbl:
+	tst.b	(a1,d2.w)
+	beq.s	.same_vbl_next
+
+	cmp		(a0,d2.w*2),d1
+	bne.s	.same_vbl_next
+
+	sf		(a1,d2.w)
+
+.same_vbl_next:
+	dbf		d2,.same_vbl
+
+	move	d1,(a0,d0.w*2)
 	lea		list_scrolls,a0
 	move	L_00E80000+$22,(a0,d0.w*2)
-	lea		list_ready,a0
-	st		(a0,d0.w)
+	st		(a1,d0.w)
 	addq	#1,game_list_serial ; A new list for render_idle.
 
 .no_sprites:
@@ -1449,13 +1470,46 @@ process_sprite_infos:
 
 	move	d3,d6 ; The newest again.
 
+	; The VBL counts are words, and a list's age is compared as a signed
+	; one: a list that only gets older (the game sends no sprites) would
+	; look like one from the future after 32,768 VBLs, with its picture
+	; held for as long. So an old list keeps a fixed age from here on, and
+	; the lists before it, which no picture wants any more, go.
+
+	cmp		#LIST_AGE_MAX,d2 ; Its age (.find).
+	bcs.s	.take
+
+	moveq	#LIST_SLOTS-1,d1
+
+.drop_older:
+	cmp		d3,d1
+	beq.s	.drop_next
+
+	sf		(a1,d1.w)
+
+.drop_next:
+	dbf		d1,.drop_older
+
+	move	renderer_vbls,d0
+	sub		#LIST_AGE_MAX,d0
+	move	d0,(a2,d3.w*2)
+
 	bra.s	.take
 
 .wanted:
 	move	(a2,d6.w*2),d0
 	add		#PICTURE_LATENCY,d0
 	sub		renderer_vbls,d0
-	subq	#1,d0 ; Its VBL less the next one.
+	subq	#1,d0 ; Its VBL less the next one,
+
+	tst.b	flip_pending ; which shows the queued picture, if there is one:
+	beq.s	.next_vbl_free ; then this one cannot be shown before the VBL
+	; after it (finish_picture waits for the queued one).
+
+	subq	#1,d0
+
+.next_vbl_free:
+	tst		d0
 	bpl.s	.take
 
 	move	d3,d6 ; Too late: the newest.
@@ -1482,6 +1536,13 @@ process_sprite_infos:
 	add		#PICTURE_LATENCY,d0
 	move	renderer_vbls,d1
 	addq	#1,d1
+
+	tst.b	flip_pending ; The next VBL is the queued picture's.
+	beq.s	.due_from
+
+	addq	#1,d1
+
+.due_from:
 	cmp		d1,d0
 	bpl.s	.due_set
 
